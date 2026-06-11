@@ -1,0 +1,145 @@
+<?xml version="1.0"?>
+<!-- ============================================================
+     Gazebo Classic 适配层：include 本体（tarantula_core）后叠加
+     仿真器专属内容——物理弹簧标签、轮胎接触参数、传感器插件、
+     ros2_control。本体改动一律改 tarantula_core.urdf.xacro，
+     此文件只关心 Gazebo 的事。
+     ============================================================ -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
+
+  <xacro:include filename="$(find tarantula_description)/urdf/tarantula_core.urdf.xacro"/>
+
+  <!-- ============ 每腿 Gazebo 标签 ============ -->
+  <xacro:macro name="leg_gazebo" params="prefix">
+
+    <!-- 物理弹簧（被动悬挂硬件）：控制器未上线时车也能站立。
+         k 取自 core 的 susp_spring_k，与前馈刚度 ff_stiffness 严格一致 -->
+    <gazebo reference="susp_${prefix}_joint">
+      <springStiffness>${susp_spring_k}</springStiffness>
+      <springReference>0.0</springReference>
+      <implicitSpringDamper>true</implicitSpringDamper>
+    </gazebo>
+
+    <!-- 轮胎接触参数 + 足端压力（接触）传感器 -->
+    <gazebo reference="wheel_${prefix}_link">
+      <mu1>1.2</mu1>
+      <mu2>0.8</mu2>
+      <kp>1000000.0</kp>
+      <kd>100.0</kd>
+      <material>Gazebo/FlatBlack</material>
+      <sensor name="contact_${prefix}" type="contact">
+        <update_rate>50</update_rate>
+        <contact>
+          <collision>wheel_${prefix}_link_collision</collision>
+        </contact>
+        <plugin name="bumper_${prefix}" filename="libgazebo_ros_bumper.so">
+          <ros>
+            <remapping>bumper_states:=contact/${prefix}</remapping>
+          </ros>
+          <frame_name>wheel_${prefix}_link</frame_name>
+        </plugin>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="arm_${prefix}_link">
+      <material>Gazebo/Orange</material>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:leg_gazebo prefix="fl"/>
+  <xacro:leg_gazebo prefix="fr"/>
+  <xacro:leg_gazebo prefix="ml"/>
+  <xacro:leg_gazebo prefix="mr"/>
+  <xacro:leg_gazebo prefix="rl"/>
+  <xacro:leg_gazebo prefix="rr"/>
+
+  <!-- ============ ros2_control ============ -->
+  <ros2_control name="GazeboSystem" type="system">
+    <hardware>
+      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+    </hardware>
+
+    <xacro:macro name="susp_iface" params="prefix">
+      <joint name="susp_${prefix}_joint">
+        <command_interface name="effort"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+        <state_interface name="effort"/>
+      </joint>
+    </xacro:macro>
+    <xacro:macro name="wheel_iface" params="prefix">
+      <joint name="wheel_${prefix}_joint">
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+
+    <xacro:susp_iface prefix="fl"/>
+    <xacro:susp_iface prefix="fr"/>
+    <xacro:susp_iface prefix="ml"/>
+    <xacro:susp_iface prefix="mr"/>
+    <xacro:susp_iface prefix="rl"/>
+    <xacro:susp_iface prefix="rr"/>
+
+    <xacro:wheel_iface prefix="fl"/>
+    <xacro:wheel_iface prefix="fr"/>
+    <xacro:wheel_iface prefix="ml"/>
+    <xacro:wheel_iface prefix="mr"/>
+    <xacro:wheel_iface prefix="rl"/>
+    <xacro:wheel_iface prefix="rr"/>
+  </ros2_control>
+
+  <!-- ============ Gazebo 插件 ============ -->
+  <gazebo>
+    <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+      <parameters>$(find tarantula_bringup)/config/controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
+        <ros>
+          <remapping>~/out:=imu/data</remapping>
+        </ros>
+        <frame_name>imu_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+    <sensor name="lidar_sensor" type="ray">
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <min_angle>${-PI}</min_angle>
+            <max_angle>${PI}</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.20</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+      </ray>
+      <plugin name="lidar_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>lidar_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="base_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+</robot>

@@ -1,0 +1,214 @@
+<?xml version="1.0"?>
+<!-- ============================================================
+     tarantula_core：仿真器无关的本体定义（规范模型，单一事实来源）
+     只含纯 URDF：连杆/关节/惯量/限位/几何/材质。
+     不含任何 <gazebo> 标签、传感器插件、ros2_control —— 那些属于
+     仿真器适配层（Gazebo Classic: tarantula.urdf.xacro）。
+     Isaac Lab 导入：xacro tarantula_core.urdf.xacro > tarantula.urdf
+     后直接喂 URDF importer；悬挂物理弹簧 k=120 Nm/rad、阻尼 c=8
+     在 Isaac 中映射为关节 drive 的 stiffness/damping（隐式 PD，
+     与 Gazebo implicitSpringDamper 同角色），见 docs §7。
+     ============================================================ -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
+
+  <!-- ============ 几何参数（控制器的几何映射依赖 arm_length/arm_angle，
+       修改时须同步 active_suspension 节点参数） ============ -->
+  <xacro:property name="body_length"  value="0.78"/>
+  <xacro:property name="body_width"   value="0.36"/>
+  <xacro:property name="body_height"  value="0.10"/>
+  <xacro:property name="body_mass"    value="18.0"/>
+
+  <xacro:property name="arm_length"   value="0.22"/>   <!-- 悬挂摆臂长度 -->
+  <xacro:property name="arm_mass"     value="0.8"/>
+  <xacro:property name="arm_angle"    value="0.698"/>  <!-- 摆臂下倾 40 度 -->
+
+  <xacro:property name="wheel_radius" value="0.12"/>
+  <xacro:property name="wheel_width"  value="0.07"/>
+  <xacro:property name="wheel_mass"   value="1.5"/>
+
+  <!-- 悬挂物理弹簧/阻尼（被动层硬件参数，主动控制的前馈刚度必须与 k 一致） -->
+  <xacro:property name="susp_spring_k"  value="120.0"/> <!-- Nm/rad -->
+  <xacro:property name="susp_damping"   value="8.0"/>   <!-- Nms/rad -->
+  <xacro:property name="susp_friction"  value="0.1"/>
+
+  <!-- 蜘蛛站姿：前腿朝前(dir=+1)、中后腿朝后(dir=-1)，六轮均布 x=+0.51/0/-0.51 -->
+  <xacro:property name="pivot_x"      value="0.34"/>
+  <xacro:property name="pivot_mx"     value="0.17"/>
+  <xacro:property name="pivot_y"      value="0.26"/>
+  <xacro:property name="pivot_z"      value="-0.08"/>
+
+  <xacro:property name="PI" value="3.14159265"/>
+
+  <!-- ============ 惯量宏 ============ -->
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertia ixx="${m/12*(y*y+z*z)}" iyy="${m/12*(x*x+z*z)}" izz="${m/12*(x*x+y*y)}"
+             ixy="0" ixz="0" iyz="0"/>
+  </xacro:macro>
+  <xacro:macro name="cylinder_inertia" params="m r h">
+    <inertia ixx="${m/12*(3*r*r+h*h)}" iyy="${m/12*(3*r*r+h*h)}" izz="${m/2*r*r}"
+             ixy="0" ixz="0" iyz="0"/>
+  </xacro:macro>
+
+  <!-- 内联材质宏：RViz2 对命名材质引用渲染不可靠，必须逐 visual 内联颜色 -->
+  <xacro:macro name="mat_body"><material name="m_body"><color rgba="0.18 0.20 0.23 1"/></material></xacro:macro>
+  <xacro:macro name="mat_accent"><material name="m_accent"><color rgba="0.85 0.40 0.05 1"/></material></xacro:macro>
+  <xacro:macro name="mat_tire"><material name="m_tire"><color rgba="0.06 0.06 0.06 1"/></material></xacro:macro>
+  <xacro:macro name="mat_hub"><material name="m_hub"><color rgba="0.65 0.67 0.70 1"/></material></xacro:macro>
+
+  <!-- ============ 车身：主舱 + 上层甲板 + 两侧悬挂安装梁 + 头部斜面 ============ -->
+  <link name="base_link">
+    <visual>  <!-- 主舱 -->
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <xacro:mat_body/>
+    </visual>
+    <visual>  <!-- 上层甲板 -->
+      <origin xyz="-0.05 0 ${body_height/2 + 0.03}"/>
+      <geometry><box size="0.45 0.28 0.06"/></geometry>
+      <xacro:mat_body/>
+    </visual>
+    <visual>  <!-- 头部斜面 -->
+      <origin xyz="${body_length/2 + 0.05} 0 0.01" rpy="0 0.35 0"/>
+      <geometry><box size="0.14 0.30 0.06"/></geometry>
+      <xacro:mat_accent/>
+    </visual>
+    <visual>  <!-- 左侧悬挂安装梁 -->
+      <origin xyz="0 ${pivot_y} ${pivot_z + 0.02}"/>
+      <geometry><box size="${body_length} 0.05 0.07"/></geometry>
+      <xacro:mat_accent/>
+    </visual>
+    <visual>  <!-- 右侧悬挂安装梁 -->
+      <origin xyz="0 ${-pivot_y} ${pivot_z + 0.02}"/>
+      <geometry><box size="${body_length} 0.05 0.07"/></geometry>
+      <xacro:mat_accent/>
+    </visual>
+    <collision>
+      <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="${body_mass}"/>
+      <xacro:box_inertia m="${body_mass}" x="${body_length}" y="${body_width}" z="${body_height}"/>
+    </inertial>
+  </link>
+
+  <!-- ============ IMU ============ -->
+  <link name="imu_link">
+    <inertial>
+      <mass value="0.05"/>
+      <xacro:box_inertia m="0.05" x="0.03" y="0.03" z="0.01"/>
+    </inertial>
+  </link>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 ${body_height/2}"/>
+  </joint>
+
+  <!-- ============ LiDAR（带支撑柱） ============ -->
+  <link name="lidar_link">
+    <visual>
+      <geometry><cylinder radius="0.045" length="0.06"/></geometry>
+      <xacro:mat_tire/>
+    </visual>
+    <visual>  <!-- 支撑柱 -->
+      <origin xyz="0 0 -0.06"/>
+      <geometry><cylinder radius="0.02" length="0.06"/></geometry>
+      <xacro:mat_hub/>
+    </visual>
+    <inertial>
+      <mass value="0.2"/>
+      <xacro:cylinder_inertia m="0.2" r="0.045" h="0.06"/>
+    </inertial>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0.22 0 ${body_height/2 + 0.12}"/>
+  </joint>
+
+  <!-- ============ 腿部宏（运动学/动力学本体，无仿真器标签） ============ -->
+  <!-- side: 1=左/-1=右；dir: 1=摆臂朝前/-1=朝后。
+       悬挂关节绕 y 轴，轮关节绕 y 轴连续转动。
+       注意：dir 决定关节角与轮子升降的方向关系，控制节点 DIR 表必须一致。 -->
+  <xacro:macro name="leg" params="prefix x side dir">
+
+    <joint name="susp_${prefix}_joint" type="revolute">
+      <parent link="base_link"/>
+      <child link="arm_${prefix}_link"/>
+      <origin xyz="${x} ${side*pivot_y} ${pivot_z}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-0.6" upper="0.6" effort="60" velocity="6"/>
+      <!-- 阻尼放物理侧（无控制延迟），软件 PD 的 kd 对延迟敏感不可依赖 -->
+      <dynamics damping="${susp_damping}" friction="${susp_friction}"/>
+    </joint>
+
+    <link name="arm_${prefix}_link">
+      <visual>  <!-- 铰点关节座 -->
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="0.035" length="0.07"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <visual>  <!-- 摆臂主体 -->
+        <origin xyz="${dir*arm_length/2*cos(arm_angle)} 0 ${-arm_length/2*sin(arm_angle)}"
+                rpy="0 ${dir*arm_angle} 0"/>
+        <geometry><box size="${arm_length} 0.045 0.06"/></geometry>
+        <xacro:mat_accent/>
+      </visual>
+      <visual>  <!-- 轮端关节套 -->
+        <origin xyz="${dir*arm_length*cos(arm_angle)} 0 ${-arm_length*sin(arm_angle)}"
+                rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="0.03" length="0.06"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <collision>
+        <origin xyz="${dir*arm_length/2*cos(arm_angle)} 0 ${-arm_length/2*sin(arm_angle)}"
+                rpy="0 ${dir*arm_angle} 0"/>
+        <geometry><box size="${arm_length} 0.045 0.06"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="${dir*arm_length/2*cos(arm_angle)} 0 ${-arm_length/2*sin(arm_angle)}"/>
+        <mass value="${arm_mass}"/>
+        <xacro:box_inertia m="${arm_mass}" x="${arm_length}" y="0.045" z="0.06"/>
+      </inertial>
+    </link>
+
+    <joint name="wheel_${prefix}_joint" type="continuous">
+      <parent link="arm_${prefix}_link"/>
+      <child link="wheel_${prefix}_link"/>
+      <origin xyz="${dir*arm_length*cos(arm_angle)} ${side*0.065} ${-arm_length*sin(arm_angle)}"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="30" velocity="30"/>
+      <dynamics damping="0.1"/>
+    </joint>
+
+    <link name="wheel_${prefix}_link">
+      <visual>  <!-- 轮胎 -->
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <xacro:mat_tire/>
+      </visual>
+      <visual>  <!-- 轮毂 -->
+        <origin xyz="0 ${side*0.005} 0" rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="0.055" length="${wheel_width + 0.005}"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <collision>
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <inertial>
+        <origin rpy="${PI/2} 0 0"/>
+        <mass value="${wheel_mass}"/>
+        <xacro:cylinder_inertia m="${wheel_mass}" r="${wheel_radius}" h="${wheel_width}"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <!-- 六条腿 -->
+  <xacro:leg prefix="fl" x="${pivot_x}"  side="1"  dir="1"/>
+  <xacro:leg prefix="fr" x="${pivot_x}"  side="-1" dir="1"/>
+  <xacro:leg prefix="ml" x="${pivot_mx}" side="1"  dir="-1"/>
+  <xacro:leg prefix="mr" x="${pivot_mx}" side="-1" dir="-1"/>
+  <xacro:leg prefix="rl" x="${-pivot_x}" side="1"  dir="-1"/>
+  <xacro:leg prefix="rr" x="${-pivot_x}" side="-1" dir="-1"/>
+
+</robot>

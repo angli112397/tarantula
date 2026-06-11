@@ -1,0 +1,30 @@
+# ROS build
+install/
+build/
+log/
+.ros/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.eggs/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.Trash-*
+
+# Gazebo
+.gazebo/
+
+# Colcon
+.colcon/
