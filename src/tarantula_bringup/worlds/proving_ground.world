@@ -1,0 +1,296 @@
+<?xml version="1.0"?>
+<!--
+  综合测试场（SLAM + Nav2 + 主动悬挂联测）
+
+  布局：外墙 20×14，中央封闭房间（西墙开 1.5m 门）形成环形回廊，
+  机器人从出生点 (0,0) 过西侧 1.6m 窄门进入环路，绕环一周回到窄门
+  触发回环闭合。四段走廊各承担一类测试，地形横贯走廊、无法绕行：
+
+    南廊  减速带×2 + 碎石场 + 左右交替单侧台阶（侧倾/冲击）
+    东廊  斜坡-平台-斜坡 横贯（俯仰调平；倾斜时 2D 雷达扫描面
+          打地→幻影障碍，主动调平保持扫描面水平即是卖点）
+    北廊  立柱迷阵 + 箱体（Nav2 局部避障，柱高 0.8 > 雷达扫描面）
+    西侧  1.6m 窄门（footprint/膨胀半径验证，回环闭合点）
+
+  尺度依据：墙高 0.8 > 雷达扫描面 ~0.5 > 平台 0.275（地形对 2D 雷达
+  不可见，costmap 视为自由空间——穿越地形交给悬挂，避障交给雷达）。
+-->
+<sdf version="1.6">
+  <world name="proving_ground">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <!-- ======== 外墙：x∈[-3,17] y∈[-7,7]，SLAM 全局参照 ======== -->
+    <model name="wall_n">
+      <static>true</static>
+      <pose>7 7 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>20.4 0.2 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>20.4 0.2 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_s">
+      <static>true</static>
+      <pose>7 -7 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>20.4 0.2 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>20.4 0.2 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_w">
+      <static>true</static>
+      <pose>-3 0 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 14 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 14 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_e">
+      <static>true</static>
+      <pose>17 0 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 14 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 14 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ======== 中央房间 x∈[4,10] y∈[-2,2]，西墙开 1.5m 门 ======== -->
+    <model name="island_n">
+      <static>true</static>
+      <pose>7 2 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>6.15 0.15 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>6.15 0.15 0.8</size></box></geometry>
+          <material><ambient>0.55 0.5 0.45 1</ambient><diffuse>0.55 0.5 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="island_s">
+      <static>true</static>
+      <pose>7 -2 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>6.15 0.15 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>6.15 0.15 0.8</size></box></geometry>
+          <material><ambient>0.55 0.5 0.45 1</ambient><diffuse>0.55 0.5 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="island_e">
+      <static>true</static>
+      <pose>10 0 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 4 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 4 0.8</size></box></geometry>
+          <material><ambient>0.55 0.5 0.45 1</ambient><diffuse>0.55 0.5 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="island_w_lower">
+      <static>true</static>
+      <pose>4 -1.375 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 1.25 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 1.25 0.8</size></box></geometry>
+          <material><ambient>0.55 0.5 0.45 1</ambient><diffuse>0.55 0.5 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="island_w_upper">
+      <static>true</static>
+      <pose>4 1.375 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 1.25 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 1.25 0.8</size></box></geometry>
+          <material><ambient>0.55 0.5 0.45 1</ambient><diffuse>0.55 0.5 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ======== 西侧窄门 x=1.5，gap y∈[-0.8,0.8]=1.6m（回环闭合点） ======== -->
+    <model name="gate_n">
+      <static>true</static>
+      <pose>1.5 3.9 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 6.2 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 6.2 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="gate_s">
+      <static>true</static>
+      <pose>1.5 -3.9 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 6.2 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 6.2 0.8</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ======== 南廊：减速带 + 碎石场 + 单侧台阶（横贯，无法绕行） ======== -->
+    <model name="bump_1">
+      <static>true</static>
+      <pose>3.2 -4.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.06</radius><length>4.6</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.06</radius><length>4.6</length></cylinder></geometry>
+          <material><ambient>0.5 0.4 0.3 1</ambient><diffuse>0.5 0.4 0.3 1</diffuse></material></visual>
+        <pose>0 0 0 1.5708 0 0</pose>
+      </link>
+    </model>
+    <model name="bump_2">
+      <static>true</static>
+      <pose>4.4 -4.5 0 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.08</radius><length>4.6</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.08</radius><length>4.6</length></cylinder></geometry>
+          <material><ambient>0.5 0.4 0.3 1</ambient><diffuse>0.5 0.4 0.3 1</diffuse></material></visual>
+        <pose>0 0 0 1.5708 0 0</pose>
+      </link>
+    </model>
+    <model name="rubble_1">
+      <static>true</static>
+      <pose>6.0 -4.0 0.03 0.2 0.1 0.5</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.25 0.2 0.07</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.25 0.2 0.07</size></box></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.45 0.42 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rubble_2">
+      <static>true</static>
+      <pose>6.5 -5.1 0.03 0.1 0.15 1.1</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.3 0.22 0.08</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.22 0.08</size></box></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.45 0.42 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rubble_3">
+      <static>true</static>
+      <pose>7.1 -4.4 0.025 0.25 0.05 0.8</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 0.25 0.06</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 0.25 0.06</size></box></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.45 0.42 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rubble_4">
+      <static>true</static>
+      <pose>7.7 -5.3 0.03 0.15 0.2 0.3</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.28 0.2 0.07</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.28 0.2 0.07</size></box></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.45 0.42 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="rubble_5">
+      <static>true</static>
+      <pose>8.2 -3.8 0.025 0.1 0.25 1.4</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.22 0.25 0.06</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.22 0.25 0.06</size></box></geometry>
+          <material><ambient>0.45 0.42 0.4 1</ambient><diffuse>0.45 0.42 0.4 1</diffuse></material></visual>
+      </link>
+    </model>
+    <!-- 左/右单侧台阶：只压一侧轮，考验侧倾调平 -->
+    <model name="half_step_l">
+      <static>true</static>
+      <pose>10.5 -3.4 0.05 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 2.2 0.10</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 2.2 0.10</size></box></geometry>
+          <material><ambient>0.4 0.4 0.45 1</ambient><diffuse>0.4 0.4 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="half_step_r">
+      <static>true</static>
+      <pose>12.2 -5.6 0.06 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 2.2 0.12</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 2.2 0.12</size></box></geometry>
+          <material><ambient>0.4 0.4 0.45 1</ambient><diffuse>0.4 0.4 0.45 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ======== 东廊：斜坡-平台-斜坡 横贯（行进方向 +y，俯仰调平） ======== -->
+    <model name="ramp_up">
+      <static>true</static>
+      <pose>13.5 -1.0 0.075 0 -0.15 1.5708</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.0 6.5 0.05</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.0 6.5 0.05</size></box></geometry>
+          <material><ambient>0.35 0.45 0.35 1</ambient><diffuse>0.35 0.45 0.35 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="plateau">
+      <static>true</static>
+      <pose>13.5 0.7 0.1375 0 0 1.5708</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 6.5 0.275</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 6.5 0.275</size></box></geometry>
+          <material><ambient>0.35 0.45 0.35 1</ambient><diffuse>0.35 0.45 0.35 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="ramp_down">
+      <static>true</static>
+      <pose>13.5 2.4 0.075 0 0.15 1.5708</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.0 6.5 0.05</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.0 6.5 0.05</size></box></geometry>
+          <material><ambient>0.35 0.45 0.35 1</ambient><diffuse>0.35 0.45 0.35 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ======== 北廊：立柱迷阵 + 箱体（高 0.8，雷达可见，Nav2 避障） ======== -->
+    <model name="pillar_1">
+      <static>true</static>
+      <pose>9 5.3 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry>
+          <material><ambient>0.7 0.45 0.2 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="pillar_2">
+      <static>true</static>
+      <pose>7 3.7 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry>
+          <material><ambient>0.7 0.45 0.2 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="pillar_3">
+      <static>true</static>
+      <pose>5 5.3 0.4 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.15</radius><length>0.8</length></cylinder></geometry>
+          <material><ambient>0.7 0.45 0.2 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="crate_1">
+      <static>true</static>
+      <pose>12 4.5 0.4 0 0 0.4</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.6 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.6 0.8</size></box></geometry>
+          <material><ambient>0.7 0.45 0.2 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="crate_2">
+      <static>true</static>
+      <pose>2.8 5.5 0.4 0 0 0.9</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.6 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.6 0.8</size></box></geometry>
+          <material><ambient>0.7 0.45 0.2 1</ambient><diffuse>0.7 0.45 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>
