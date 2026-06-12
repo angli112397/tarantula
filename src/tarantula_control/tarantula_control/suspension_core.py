@@ -163,7 +163,7 @@ class SuspensionController:
             out.q_target = dict(self.q_target)
             out.probe_dz = dict(self.probe)
             return out
-        gain = min(1.0, (self.t - cfg.startup_hold) / cfg.gain_ramp)
+        gain = 1.0 if cfg.gain_ramp <= 0 else min(1.0, (self.t - cfg.startup_hold) / cfg.gain_ramp)
 
         # 包络保护：姿态异常时外环清零，只回名义位，绝不挣扎
         frozen = math.sqrt(x.roll ** 2 + x.pitch ** 2) > cfg.tilt_freeze
