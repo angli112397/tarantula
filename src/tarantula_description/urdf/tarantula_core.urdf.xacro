@@ -39,7 +39,8 @@
     <joint name="lidar_joint" type="fixed">
       <parent link="payload_mount"/>
       <child link="lidar_link"/>
-      <origin xyz="0.22 0 0.12"/>
+      <!-- 安装板顶面(0.092) + 0.078 = 0.17，与历史 LiDAR 世界位姿严格一致 -->
+      <origin xyz="0.22 0 0.078"/>
     </joint>
   </xacro:if>
 

@@ -115,6 +115,17 @@ prefix 可复用、payload_mount 载荷位，单一事实来源）→
 | diff_drive_controller | 轮速 velocity drive | |
 | 接触/LiDAR 插件 | ContactSensor / RayCaster | 调平任务非必需 |
 
+控制代码同样分层（2026-06-12）：`suspension_core.py` = 零 ROS 依赖的
+算法核心，`active_suspension.py` = ROS 适配层。Isaac env 直接
+`import suspension_core`，Gazebo 与 Isaac 跑同一份算法。三个暴露面：
+**参数面** `SuspensionConfig`（全部可调参数，RL 域随机化自由度）、
+**观测面** `SuspensionInputs`（roll/pitch/角速度/关节角/轮地接触）、
+**动作面** roll_ref/pitch_ref/height_cmd（车身位姿指令，复用几何映射，
+天然有界——RL 动作空间首选，比直接出力矩安全）。新增两条算法通道
+（默认关/零，行为与 v3 逐步等价）：M2 高度通道（dz 加 z_cmd 项，
+±0.06 m）与 M1 接触保持状态机（悬空消抖→缓慢下探→重着地撤回，
+下探量受 target_limit 总限幅约束），均待调参验收后启用。
+
 对比实验设计：同一 core 模型、同一 G2/G3 场景（8° 斜坡、崎岖路），
 对比三种实现——v3 前馈+天棚（移植）、kHz 级管线内全状态反馈
 （Isaac 无话题延迟，可验证"延迟是 roll 动态抑制瓶颈"的归因）、RL 策略。

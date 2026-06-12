@@ -42,6 +42,10 @@
   <xacro:property name="pivot_y"      value="0.26"/>
   <xacro:property name="pivot_z"      value="-0.08"/>
 
+  <!-- 载荷安装板（模块化底盘的视觉/接口特征：平整安装面，非整车造型） -->
+  <xacro:property name="deck_standoff" value="0.03"/>   <!-- 支撑柱高 -->
+  <xacro:property name="deck_thick"    value="0.012"/>  <!-- 安装板厚 -->
+
   <xacro:property name="PI" value="3.14159265"/>
 
   <!-- ============ 惯量宏 ============ -->
@@ -52,6 +56,15 @@
   <xacro:macro name="cylinder_inertia" params="m r h">
     <inertia ixx="${m/12*(3*r*r+h*h)}" iyy="${m/12*(3*r*r+h*h)}" izz="${m/2*r*r}"
              ixy="0" ixz="0" iyz="0"/>
+  </xacro:macro>
+
+  <!-- 安装板支撑柱（视觉件） -->
+  <xacro:macro name="deck_post" params="x y">
+    <visual>
+      <origin xyz="${x} ${y} ${body_height/2 + deck_standoff/2}"/>
+      <geometry><cylinder radius="0.012" length="${deck_standoff}"/></geometry>
+      <xacro:mat_tire/>
+    </visual>
   </xacro:macro>
 
   <!-- 内联材质宏：RViz2 对命名材质引用渲染不可靠，必须逐 visual 内联颜色 -->
@@ -141,20 +154,26 @@
   <!-- ============ 底盘模块宏 ============ -->
   <xacro:macro name="tarantula_chassis" params="prefix:=''">
 
-    <!-- 车身：主舱 + 上层甲板 + 两侧悬挂安装梁 + 头部斜面 -->
+    <!-- 车身：主舱 + 载荷安装板（支撑柱架高的平整安装面）+ 两侧悬挂安装梁
+         + 前保险杠（方向标识）。视觉语言对标 Husky/Scout 类模块化底盘：
+         无整车造型，顶面就是给上装用的接口。只改 visual 不碰 collision。 -->
     <link name="${prefix}base_link">
       <visual>  <!-- 主舱 -->
         <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
         <xacro:mat_body/>
       </visual>
-      <visual>  <!-- 上层甲板 -->
-        <origin xyz="-0.05 0 ${body_height/2 + 0.03}"/>
-        <geometry><box size="0.45 0.28 0.06"/></geometry>
-        <xacro:mat_body/>
+      <visual>  <!-- 载荷安装板 -->
+        <origin xyz="0 0 ${body_height/2 + deck_standoff + deck_thick/2}"/>
+        <geometry><box size="0.55 0.30 ${deck_thick}"/></geometry>
+        <xacro:mat_hub/>
       </visual>
-      <visual>  <!-- 头部斜面 -->
-        <origin xyz="${body_length/2 + 0.05} 0 0.01" rpy="0 0.35 0"/>
-        <geometry><box size="0.14 0.30 0.06"/></geometry>
+      <xacro:deck_post x="0.24"  y="0.12"/>
+      <xacro:deck_post x="0.24"  y="-0.12"/>
+      <xacro:deck_post x="-0.24" y="0.12"/>
+      <xacro:deck_post x="-0.24" y="-0.12"/>
+      <visual>  <!-- 前保险杠 -->
+        <origin xyz="${body_length/2 + 0.015} 0 0"/>
+        <geometry><box size="0.03 ${body_width} 0.06"/></geometry>
         <xacro:mat_accent/>
       </visual>
       <visual>  <!-- 左侧悬挂安装梁 -->
@@ -189,13 +208,13 @@
       <origin xyz="0 0 ${body_height/2}"/>
     </joint>
 
-    <!-- 载荷安装位：外部载荷（LiDAR/相机/上装）统一挂这里，
+    <!-- 载荷安装位：安装板顶面中心，外部载荷（LiDAR/相机/上装）统一挂这里，
          底盘模块本身不预设任何载荷 -->
     <link name="${prefix}payload_mount"/>
     <joint name="${prefix}payload_mount_joint" type="fixed">
       <parent link="${prefix}base_link"/>
       <child link="${prefix}payload_mount"/>
-      <origin xyz="0 0 ${body_height/2}"/>
+      <origin xyz="0 0 ${body_height/2 + deck_standoff + deck_thick}"/>
     </joint>
 
     <!-- 六条腿 -->
