@@ -12,12 +12,15 @@
 ## 架构
 
 ```
-tarantula_description   两层 URDF/xacro：tarantula_core（仿真器无关本体，
-                        Isaac Lab 可直接导入）+ tarantula（Gazebo 适配层：
-                        物理弹簧标签 / 传感器插件 / ros2_control）
+tarantula_description   模块化底盘建模（产品是底盘，整车是配置）：
+                        tarantula_chassis（底盘模块宏：prefix 可复用、
+                        payload_mount 载荷位、IMU 固有，单一事实来源）
+                        → tarantula_core（演示配置 = 底盘 + LiDAR 载荷，
+                        lidar:=false 输出裸底盘，Isaac Lab 导入入口）
+                        → tarantula（Gazebo 适配层：弹簧标签/插件/ros2_control）
 tarantula_bringup       launch / 控制器配置 / 三个测试 world / SLAM / RViz 配置
 tarantula_control       active_suspension：串级位置式调平节点
-docs/                   控制架构选型报告（算法对比、文献、验收数据）
+docs/                   01 控制架构选型报告 / 02 项目目标与里程碑（v2 修订）
 scripts/                可复现实验：平地稳定 / 8°斜坡对照 / 崎岖路动态对照
 ```
 
@@ -87,11 +90,18 @@ q_target×6, q×6, tau×6]。
 | startup_hold / gain_ramp | 5.0 / 2.0 | 落地保持期（零力矩）/ 增益渐入 |
 | tilt_freeze | 0.35 | 包络保护阈值（rad） |
 
-## 验收状态（v3 定稿）
+## 验收状态（目标 v2，详见 docs/02-project-goals.md）
 
-- [x] G1 平地：0.05°，44s 零漂移
-- [x] G2 静坡 8°：被动 8.16° / 主动 **0.09°**，20s 收敛，零自旋零翻车
-- [x] G3 崎岖路：pitch RMS -27%、max pitch -18%（roll 动态抑制受延迟限制，docs §5）
-- [x] G4 SLAM：slam_toolbox 成图正常
-- [ ] 外观目检（用户，Gazebo/RViz）
-- [ ] 演示录像（leveling:=true/false 对照 + SLAM）、GitHub 发布
+Phase 1 调平（已完成）：
+- [x] G1 平地 0.05° / G2 静坡 8.16°→**0.09°**（98.9%）/ G3 pitch RMS -27% / G4 SLAM 成图
+
+Phase 2 功能扩展（Gazebo）：
+- [ ] M1 接触保持状态机（接触丢失时长 ≥40% 下降）
+- [ ] M2 车身高度调节（roll/pitch/z 三维车身指令）
+- [ ] M3 设计研究：TeCVP 吸收 + 2-DOF 构型 IK 工作空间论证
+
+Phase 3 Isaac Lab（GPU 到货后）：
+- [ ] M4 冒烟 / M5 v3 移植复现 / M6 kHz 延迟归因 / M7 RL 对照（冲刺项）
+
+Phase 4 交付：
+- [ ] 外观目检、演示录像（调平/高度/接触保持 A/B + SLAM）、GitHub 发布

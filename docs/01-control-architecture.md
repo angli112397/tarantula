@@ -99,9 +99,12 @@
 
 ## 7. Isaac Lab 移植映射（规划中，RTX 4060 Ti 16G 到货后启动）
 
-模型已拆为两层：`tarantula_core.urdf.xacro`（仿真器无关本体，单一事实来源）
-+ `tarantula.urdf.xacro`（Gazebo Classic 适配层）。Isaac 导入入口：
-`xacro tarantula_core.urdf.xacro > tarantula.urdf` 后喂 URDF importer。
+模型按"模块化底盘"定位分三层：`tarantula_chassis.xacro`（底盘模块宏，
+prefix 可复用、payload_mount 载荷位，单一事实来源）→
+`tarantula_core.urdf.xacro`（演示配置 = 底盘 + LiDAR 载荷）→
+`tarantula.urdf.xacro`（Gazebo Classic 适配层）。Isaac 导入入口：
+`xacro tarantula_core.urdf.xacro lidar:=false > tarantula.urdf`
+（裸底盘，调平任务无需 LiDAR）后喂 URDF importer。
 
 | Gazebo Classic 侧 | Isaac Lab 侧 | 备注 |
 |---|---|---|
