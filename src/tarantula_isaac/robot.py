@@ -1,14 +1,13 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""Tarantula rover articulation config for Isaac Lab (M5/M7 v4).
+"""Tarantula rover articulation config for Isaac Lab baseline.
 
 Reuses the USD produced by the ``UrdfConverter`` run: ``susp_*_joint``
-position drive with stiffness=120/damping=8 (matches the Gazebo
-``springStiffness``/``springReference``/``implicitSpringDamper`` + joint
-``dynamics damping`` -- see docs/01 §7; v4 applies position targets directly
-from the kinematic mapping without a SuspensionController wrapper).
+position drive with stiffness=130/damping=11. Gazebo deployment mirrors this
+with an explicit bounded PD effort actuator in ``rl_suspension_policy.py``;
+we no longer rely on Gazebo-only joint spring tags.
 ``wheel_*_joint`` is velocity-driven (``target_type="velocity"``,
-stiffness=``WHEEL_DRIVE_GAIN``) for direct differential-drive control.
+stiffness=``WHEEL_DRIVE_GAIN``) for direct wheel control.
 """
 
 import os
@@ -19,17 +18,18 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 TARANTULA_USD_DIR = "/tmp/tarantula_usd"
-TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, "tarantula_core_v2.usd")
+TARANTULA_USD_NAME = "tarantula_core_baseline_pd_sphere_wheels.usd"
+TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, TARANTULA_USD_NAME)
 
 # Generated via: xacro tarantula_core.urdf.xacro lidar:=false > URDF_PATH
 URDF_PATH = "/tmp/tarantula_core.urdf"
 
 # Velocity-drive P gain for wheel_*_joint (rad/s -> N*m). Wheel limit is
-# effort=30 N*m / velocity=30 rad/s. Chosen so that a full-scale RL action
+# effort=38 N*m / velocity=30 rad/s. Chosen so that a full-scale RL action
 # (+-1 * action_scale_wheel_omega=3.0 rad/s, see suspension_env_cfg.py) demands
-# exactly 30 N*m -- the full [-1,1] action range maps onto the actuator's full
+# about 38 N*m -- the full [-1,1] action range maps onto the actuator's full
 # torque range with no saturated dead zone.
-WHEEL_DRIVE_GAIN = 10.0
+WHEEL_DRIVE_GAIN = 12.7
 
 
 def _compute_wheel_bottom_z(urdf_path: str) -> float:
@@ -37,7 +37,7 @@ def _compute_wheel_bottom_z(urdf_path: str) -> float:
 
     Walks each ``wheel_*_joint``'s parent chain back to ``base_link``,
     summing joint-origin z offsets, then subtracts the wheel collision
-    cylinder's radius. This assumes every joint origin along the
+    primitive radius. This assumes every joint origin along the
     ``base_link -> ... -> wheel_*_link`` chain has ``rpy="0 0 0"`` (true for
     the current chassis -- all leg-angle rotation is baked into link-local
     visual/collision geometry, not joint origins); raises if that assumption
@@ -83,8 +83,16 @@ def _compute_wheel_bottom_z(urdf_path: str) -> float:
             z += xyz[2]
             link = parent
 
-        cylinder = root.find(f"./link[@name='{wheel_link}']/collision/geometry/cylinder")
-        bottom = z - float(cylinder.get("radius"))
+        geometry = root.find(f"./link[@name='{wheel_link}']/collision/geometry")
+        sphere = geometry.find("sphere") if geometry is not None else None
+        cylinder = geometry.find("cylinder") if geometry is not None else None
+        if sphere is not None:
+            radius = float(sphere.get("radius"))
+        elif cylinder is not None:
+            radius = float(cylinder.get("radius"))
+        else:
+            raise ValueError(f"{wheel_link} collision geometry must be sphere or cylinder")
+        bottom = z - radius
         lowest_z = bottom if lowest_z is None else min(lowest_z, bottom)
 
     if lowest_z is None:
@@ -101,7 +109,7 @@ SPAWN_Z_OFFSET = SPAWN_GROUND_CLEARANCE - _compute_wheel_bottom_z(URDF_PATH)
 
 
 def ensure_tarantula_usd(urdf_path: str = URDF_PATH) -> str:
-    """Regenerate the tarantula USD if missing (M7 v2 joint-drive config)."""
+    """Regenerate the tarantula USD if missing (PD actuator + sphere-wheel collision config)."""
     if os.path.exists(TARANTULA_USD_PATH):
         return TARANTULA_USD_PATH
 
@@ -110,20 +118,17 @@ def ensure_tarantula_usd(urdf_path: str = URDF_PATH) -> str:
     urdf_cfg = UrdfConverterCfg(
         asset_path=urdf_path,
         usd_dir=TARANTULA_USD_DIR,
-        usd_file_name="tarantula_core_v2.usd",
+        usd_file_name=TARANTULA_USD_NAME,
         force_usd_conversion=True,
         fix_base=False,
         merge_fixed_joints=True,
         self_collision=False,
-        # Keep False: native USD Cylinder (radius=0.12, height=0.07) matches
-        # Gazebo collision geometry exactly. True caused near-zero in-place yaw
-        # (capsule end caps ~2x wheel width).
         joint_drive=UrdfConverterCfg.JointDriveCfg(
             drive_type="force",
             target_type={"susp_.*_joint": "position", "wheel_.*_joint": "velocity"},
             gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                stiffness={"susp_.*_joint": 120.0, "wheel_.*_joint": WHEEL_DRIVE_GAIN},
-                damping={"susp_.*_joint": 8.0, "wheel_.*_joint": 0.0},
+                stiffness={"susp_.*_joint": 130.0, "wheel_.*_joint": WHEEL_DRIVE_GAIN},
+                damping={"susp_.*_joint": 11.0, "wheel_.*_joint": 0.0},
             ),
         ),
     )
@@ -136,7 +141,7 @@ TARANTULA_CFG = ArticulationCfg(
     # Single implicit-actuator group covering every joint: stiffness/damping
     # explicitly set to None (ActuatorBaseCfg has no default -- MISSING) so
     # the USD-configured drive gains are preserved as-is, i.e. susp_*_joint
-    # keeps stiffness=120/damping=8 and wheel_*_joint keeps its
+    # keeps stiffness=130/damping=11 and wheel_*_joint keeps its
     # velocity-drive gain (WHEEL_DRIVE_GAIN).
     actuators={"all": ImplicitActuatorCfg(joint_names_expr=[".*"], stiffness=None, damping=None)},
 )

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!-- ============================================================
      Gazebo Ignition (gz-sim) 适配层：include 本体（tarantula_core）后叠加
-     仿真器专属内容——物理弹簧标签、轮胎接触参数、传感器、
+     仿真器专属内容——轮胎接触参数、力/力矩传感器、
      ros2_control（经 gz_ros2_control）。本体改动一律改
      tarantula_core.urdf.xacro，此文件只关心 Gazebo 的事。
      ============================================================ -->
@@ -12,16 +12,9 @@
   <!-- ============ 每腿 Gazebo 标签 ============ -->
   <xacro:macro name="leg_gazebo" params="prefix">
 
-    <!-- 物理弹簧（被动悬挂硬件）：控制器未上线时车也能站立。
-         k 取自 core 的 susp_spring_k，与前馈刚度 ff_stiffness 严格一致。
-         sdformat 将其转换为 SDF <axis><dynamics><spring_stiffness>/
-         <spring_reference>，dartsim 支持隐式弹簧阻尼。 -->
+    <!-- 髋关节力/力矩传感器：child(摆臂)对parent(车身)的反作用力。
+         只做诊断/系统辨识，不作为部署策略的必需接触真值。 -->
     <gazebo reference="susp_${prefix}_joint">
-      <springStiffness>${susp_spring_k}</springStiffness>
-      <springReference>0.0</springReference>
-      <implicitSpringDamper>true</implicitSpringDamper>
-      <!-- 力/力矩传感器（存在性验证）：child(摆臂)对parent(车身)的反作用力，
-           用车身坐标表达——force.z 即该腿对车身的支撑力，>0 大致表示着地 -->
       <sensor name="ft_${prefix}" type="force_torque">
         <update_rate>50</update_rate>
         <topic>ft/${prefix}</topic>
@@ -34,15 +27,14 @@
 
     <!-- 轮胎接触参数 -->
     <gazebo reference="wheel_${prefix}_link">
-      <mu1>1.2</mu1>
-      <mu2>0.8</mu2>
+      <mu1>1.35</mu1>
+      <mu2>1.05</mu2>
       <kp>1000000.0</kp>
-      <kd>100.0</kd>
+      <kd>140.0</kd>
     </gazebo>
 
-    <!-- 轮轴力/力矩传感器（验证用）：child(轮)对parent(摆臂)的反作用力，摆臂坐标表达。
-         轮子无弹簧、惯量远小于摆臂，理论上比髋关节 ft_${prefix} 更接近纯地面接触力，
-         用于对比噪声特征，暂不接入控制逻辑。 -->
+    <!-- 轮轴力/力矩传感器：部署可实现的轮载观测来源（轮毂/轮轴 F/T）。
+         RL 不使用几何 contact boolean；轮载由 ||F|| 或法向力连续估计。 -->
     <gazebo reference="wheel_${prefix}_joint">
       <sensor name="ft_wheel_${prefix}" type="force_torque">
         <update_rate>50</update_rate>
@@ -51,18 +43,6 @@
           <frame>parent</frame>
           <measure_direction>child_to_parent</measure_direction>
         </force_torque>
-      </sensor>
-    </gazebo>
-
-    <!-- 几何接触传感器（地面真值）：wheel_${prefix}_link 的碰撞体是否与任意几何体接触，
-         与力/力矩信号在数值上无关——用于核查 force.z>阈值 是否真的对应"轮子着地"。 -->
-    <gazebo reference="wheel_${prefix}_link">
-      <sensor name="contact_${prefix}" type="contact">
-        <update_rate>50</update_rate>
-        <topic>contact/${prefix}</topic>
-        <contact>
-          <collision>wheel_${prefix}_link_collision</collision>
-        </contact>
       </sensor>
     </gazebo>
   </xacro:macro>

@@ -1,16 +1,14 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""RSL-RL PPO runner config for the tarantula suspension task (M7 v5).
+"""RSL-RL PPO runner config for Tarantula Stage A wheel-only task.
 
-MLP (obs=47, action=12): 6 independent susp joint angles + 6 independent
-wheel velocities. No kinematic mapping -- policy learns terrain geometry
-directly. Hidden dims increased to [128, 128] to accommodate larger
-action/obs space.
+MLP (obs=41, action=6): six independent wheel velocities. Suspension is held
+by the environment in Isaac and by stand_suspension_hold in Gazebo.
 """
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 
 @configclass
@@ -19,15 +17,17 @@ class TarantulaSuspensionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 400
     save_interval = 50
     experiment_name = "tarantula_suspension"
-    empirical_normalization = True
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[128, 128],
-        critic_hidden_dims=[128, 128],
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[128, 128],
         activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[128, 128],
+        activation="elu",
+        obs_normalization=True,
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

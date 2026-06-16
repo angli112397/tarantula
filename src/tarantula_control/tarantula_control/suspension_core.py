@@ -1,24 +1,19 @@
-"""主动悬挂控制核心 —— 仿真器无关，零 ROS 依赖（算法见 docs/01 §6 v3）。
+"""主动悬挂控制核心 —— 仿真器无关，零 ROS 依赖。
 
 分层契约（Gazebo 与 Isaac Lab 共享同一份算法）：
   - 本文件只依赖标准库；适配层（ROS 节点 / Isaac env）负责喂数和发令。
-  - Isaac Lab 集成：env 里直接 `SuspensionController(SuspensionConfig())`，
-    每个物理步构造 SuspensionInputs 调 step()，把 torques 写进 joint effort。
-    控制环频率由调用方决定（Gazebo 100Hz / Isaac 可到 kHz）。
-
-三个暴露面（Isaac / RL 对接口）：
+三个暴露面：
   参数面  SuspensionConfig   —— 全部可调参数（RL 域随机化/调参的自由度）
   观测面  SuspensionInputs   —— 姿态/关节角/轮地接触（RL observation 候选）
   动作面  inputs 中的 roll_ref/pitch_ref/height_cmd（RL action 候选：
           车身位姿指令，复用几何映射，天然有界——比直接出力矩安全）
 
-算法（v3 + M1/M2 扩展，行为不变原则：默认参数下与 v3 逐步等价）：
-  外环：roll/pitch 各一 PID（D 项作用于姿态角速率，抑制 bump 激起的被动悬挂
-        共振放大；kd=0 时退化为 v3 纯 PI；条件积分抗饱和、死区、输出限幅=行程界限）
+算法：
+  外环：roll/pitch 各一 PID（D 项作用于姿态角速率；条件积分抗饱和、死区、输出限幅=行程界限）
   映射：dz_i = x_i·u_pitch − y_i·u_roll + z_cmd（M2 高度通道）
         q_target_i = q0 + DIR_i·dz_i/(L·cosθ₀)，限幅+斜率限制
   前馈：tau = k_spring·dq 平移物理弹簧平衡点（DC=1.0，无软件快环）
-  M1 接触保持（默认关）：每腿 支撑/悬空/重着地 状态机，悬空超过消抖时间
+  接触保持：每腿 支撑/悬空/重着地 状态机，悬空超过消抖时间
         后以 probe_slew 缓慢下探找地，重着地后同速率撤回；
         下探量并入平衡点偏移，受 target_limit 总限幅约束
   安全：落地保持期零力矩 + 增益渐入；倾角>tilt_freeze 包络冻结
@@ -63,7 +58,7 @@ def projected_gravity(w, x, y, z):
 
 @dataclass
 class SuspensionConfig:
-    """参数面。默认值即 v3 定稿值（参数安全包络见 docs/01 §5 已知限制③）。"""
+    """参数面。默认值为当前 Gazebo/Isaac baseline。"""
     # 几何（与 URDF 一致，修改须同步 tarantula_chassis.xacro）
     arm_length: float = 0.22
     arm_angle: float = 0.698
@@ -79,9 +74,11 @@ class SuspensionConfig:
     pitch_kd: float = 0.1
     att_deadband: float = 0.009     # rad ≈ 0.5°
     att_out_limit: float = 0.22     # rad，行程内
-    # 前馈刚度：必须与 URDF springStiffness 手动保持同步（tarantula_chassis.xacro susp_spring_k）
-    # RL 路径同样使用此值（rl_suspension_policy.py）；修改 URDF 后需同步更新此处
-    ff_stiffness: float = 120.0
+    # 悬挂执行器等效参数：Gazebo/Isaac 都应通过显式受限执行器模型使用这些值，
+    # 不再依赖 Gazebo-only joint spring。
+    ff_stiffness: float = 130.0
+    actuator_damping: float = 11.0
+    actuator_effort_limit: float = 75.0
     # 平衡点安全包络（0.55/0.3 等组合实测翻车，勿动）
     target_slew_rate: float = 0.20  # rad/s
     target_limit: float = 0.45      # rad，关节硬限位 0.6
@@ -125,9 +122,7 @@ class SuspensionOutputs:
     height: float = 0.0                              # 实际生效的 z 指令
     frozen: bool = False
     holding: bool = False
-    # Isaac Lab 集成用：等效关节位置目标 = q0 + gain·dq_total
-    # （position-drive PD 代入后与 torques 的弹簧前馈代数恒等，
-    #  见 docs/01 §7；leg -> rad）
+    # 等效关节位置目标 = q0 + gain·dq_total（leg -> rad）。
     drive_target: dict = field(default_factory=dict)
 
 
@@ -246,7 +241,7 @@ class SuspensionController:
         return out
 
     def reset_targets_only(self):
-        """保持期内归位：渐入从零力矩开始，PI 不带历史。"""
+        """保持期内归位：渐入从零力矩开始，PI 不带累积状态。"""
         self.roll_pi.reset()
         self.pitch_pi.reset()
         for leg in LEGS:

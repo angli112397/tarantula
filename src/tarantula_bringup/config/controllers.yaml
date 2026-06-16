@@ -22,7 +22,7 @@ diff_drive_controller:
     right_wheel_names: [wheel_fr_joint, wheel_mr_joint, wheel_rr_joint]
 
     wheel_separation: 0.64
-    wheel_radius: 0.12
+    wheel_radius: 0.13
     # 六轮差速（滑移转向）：放大等效轮距补偿轮胎侧滑
     wheel_separation_multiplier: 1.6
 

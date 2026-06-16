@@ -1,32 +1,29 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""DirectRLEnv config for the tarantula active-suspension task (M7 v5).
+"""DirectRLEnv config for the Tarantula wheel-only Stage A locomotion task.
 
-Action space = 12D (6 susp joint angles + 6 wheel velocities, all independent).
-  action[0:6]  = susp_{fl,fr,ml,mr,rl,rr}_joint position targets (LEGS order)
-                 normalized ±1 -> ±action_scale_susp rad; clamped ±0.6 rad
-  action[6:12] = wheel_{fl,fr,ml,mr,rl,rr}_joint velocity targets (LEGS order)
+Action space = 6D:
+  action[0:6] = wheel_{fl,fr,ml,mr,rl,rr}_joint velocity targets (LEGS order)
                  normalized ±1 -> ±action_scale_wheel_omega rad/s
 
-No kinematic mapping: the policy learns the geometry from experience.
+Suspension is held at a neutral target in Isaac. Gazebo deployment uses
+stand_suspension_hold for the same Stage A separation.
 
-Observation space = 47D:
+Observation space = 41D:
   projected_gravity_b(3) + root_ang_vel_b(3) + root_lin_vel_b(3)
   + susp_joint_pos(6) + susp_joint_vel(6) + wheel_joint_vel(6)
-  + wheel_in_contact(6)    <- ft_wheel magnitude > contact_force_threshold
-  + move_cmd(1) + heading_rate_cmd(1) + prev_action(12)
+  + wheel_load(6)          <- wheel-axis F/T equivalent, normalized by nominal wheel load
+  + cmd_vx(1) + cmd_wz(1) + prev_action(6)
 """
 
-import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, ImuCfg
 from isaaclab.sim import SimulationCfg
-from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from .robot import TARANTULA_CFG
-from .terrains import TARANTULA_TERRAIN_CFG
+from .shared_heightmap_terrain import SharedHeightmapTerrainImporterCfg, make_shared_heightmap_terrain_cfg
 
 
 @configclass
@@ -34,22 +31,24 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 4
     episode_length_s = 15.0
-    action_space = 12   # susp(6) + wheel(6), all per-joint independent
-    observation_space = 47  # see module docstring
+    action_space = 6
+    observation_space = 41  # see module docstring
     state_space = 0
 
     # action scaling: policy outputs ±1 -> physical units
-    action_scale_susp = 0.5         # rad, direct joint angle (±1 -> ±0.5 rad; URDF limit ±0.6)
+    stand_susp_target = 0.0         # rad, Stage A neutral suspension target
     action_scale_wheel_omega = 3.0  # rad/s, per-wheel velocity target
 
-    # driving: each episode samples a direction-only command pair
-    wheel_radius = 0.12  # m, from tarantula_chassis.xacro
-    target_speed_range = (0.1, 0.3)  # m/s when move_cmd=1
-    move_prob = 0.7
-    heading_rate_range = (-0.2, 0.2)  # rad/s
+    # driving: each episode samples a deployable cmd_vel-style command.
+    wheel_radius = 0.13  # m, from tarantula_chassis.xacro
+    command_vx_range = (-0.3, 0.3)  # m/s
+    command_wz_range = (-0.4, 0.4)  # rad/s
+    command_stop_prob = 0.2
 
-    # contact detection: matches /ft_wheel threshold in active_suspension.py
-    contact_force_threshold = 5.0  # N, wheel net-force magnitude -> in_contact boolean
+    # Wheel-load observation: deployable equivalent is wheel-axis F/T magnitude.
+    # nominal_wheel_load is used for observation normalization only.
+    gravity = 9.81
+    nominal_wheel_load = 23.1 * gravity / 6.0  # body(18) + 6*(arm 0.8 + wheel 1.5)
 
     # domain randomization
     friction_range = (0.3, 1.5)
@@ -59,41 +58,37 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     push_interval_steps = (150, 300)
     push_lin_vel_range = (-0.5, 0.5)  # m/s x/y delta
 
-    # reward weights
-    reward_attitude_weight = 0.1
-    reward_attitude_sigma = 0.25    # rad
-    reward_velocity_weight = 1.5
-    reward_velocity_sigma_move = 0.1
-    reward_velocity_sigma_stop = 0.05
-    reward_yaw_rate_weight = 0.5
-    reward_yaw_rate_sigma = 0.1
-    reward_ang_vel_xy_weight = 0.01
+    # Reward baseline: trimmed from common rough-terrain locomotion rewards
+    # used in legged_gym-style policies.
+    reward_tracking_lin_vel_weight = 1.5
+    reward_tracking_lin_vel_sigma = 0.12
+    reward_tracking_yaw_rate_weight = 0.5
+    reward_tracking_yaw_rate_sigma = 0.15
+    reward_orientation_weight = 0.4
+    reward_orientation_sigma = 0.35
+    reward_ang_vel_xy_weight = 0.03
     reward_lin_vel_z_weight = 0.5
     reward_action_rate_weight = 0.01
-    reward_contact_weight = 0.3     # fraction of wheels in contact (0-1)
-    reward_alive_bonus = 0.1
-    reward_fall_penalty = 10.0
+    reward_action_magnitude_weight = 0.002
+    reward_joint_limit_weight = 0.05
+    reward_alive_bonus = 0.05
+    reward_termination_penalty = 8.0
 
-    episode_tilt_limit = 0.6  # rad (~34 deg)
+    # Termination baseline. The terrain importer also keeps reset origins away
+    # from the heightmap edge via spawn_xy_margin, so bounds terminations measure
+    # policy drift rather than edge-biased spawn placement.
+    episode_tilt_limit = 0.75  # rad (~43 deg)
+    episode_min_base_height = 0.05
+    episode_max_base_height = 1.20
+    episode_bounds_margin = 0.50
+    episode_max_lin_vel = 5.0
+    episode_max_ang_vel = 8.0
 
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
 
     # terrain
-    terrain: TerrainImporterCfg = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="generator",
-        terrain_generator=TARANTULA_TERRAIN_CFG,
-        max_init_terrain_level=1,
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-        ),
-        debug_vis=False,
-    )
+    terrain: SharedHeightmapTerrainImporterCfg = make_shared_heightmap_terrain_cfg()
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=8.0, replicate_physics=True)
@@ -104,8 +99,9 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # sensors
     imu: ImuCfg = ImuCfg(prim_path="/World/envs/env_.*/Robot/base_link")
 
-    # wheel contact sensors: prim regex matches fl/fr/ml/mr/rl/rr alphabetically = LEGS order
-    wheel_contacts: ContactSensorCfg = ContactSensorCfg(
+    # Wheel-load sensors: simulation contact-force backend used as the Isaac-side
+    # equivalent of deployable wheel-axis F/T sensors.
+    wheel_loads: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/wheel_.*_link",
         update_period=0.0,
         history_length=1,

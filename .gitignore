@@ -27,5 +27,9 @@ dist/
 # Gazebo
 .gazebo/
 
+# Generated terrain assets
+generated/
+src/tarantula_terrain/generated/
+
 # Colcon
 .colcon/

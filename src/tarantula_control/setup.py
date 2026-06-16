@@ -20,8 +20,11 @@ setup(
     entry_points={
         'console_scripts': [
             'active_suspension = tarantula_control.active_suspension:main',
+            'cmd_vel_wheel_baseline = tarantula_control.cmd_vel_wheel_baseline:main',
+            'gazebo_truth_odometry = tarantula_control.gazebo_truth_odometry:main',
             'rl_suspension_policy = tarantula_control.rl_suspension_policy:main',
             'scan_gate = tarantula_control.scan_gate:main',
+            'stand_suspension_hold = tarantula_control.stand_suspension_hold:main',
         ],
     },
 )

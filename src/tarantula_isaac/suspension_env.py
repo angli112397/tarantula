@@ -1,16 +1,21 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""DirectRLEnv for the tarantula active-suspension task (M7 v5).
+"""DirectRLEnv for the Tarantula wheel-only Stage A locomotion task.
 
-v5 removes the kinematic mapping entirely. The policy's 12D action directly
-drives joints:
-  action[0:6]  -> susp_*_joint position targets (per-wheel independent, ±0.5 rad)
-  action[6:12] -> wheel_*_joint velocity targets (per-wheel independent, ±3 rad/s)
+The policy's 6D action directly drives wheel joints:
+  action[0:6] -> wheel_*_joint velocity targets (per-wheel independent, ±3 rad/s)
 
-Wheel contact signal (6D boolean, net force > 5 N) is added to the observation,
-matching the /ft_wheel/{leg} signal used in the Gazebo deployment.
+Suspension is held at a neutral target by the env. Gazebo deployment should run
+stand_suspension_hold and use a wheel-only actor for this Stage A task.
 
-Action space = 12D. Obs = 47D. See suspension_env_cfg.py for full layout.
+Wheel load signal (6D continuous, net force normalized by nominal wheel load) is
+added to the observation, matching the deployable /ft_wheel/{leg} F/T signal used
+in the Gazebo deployment. Geometry contact booleans are intentionally not part
+of the policy observation.
+
+The command interface is cmd_vel-style: cmd_vx (m/s) and cmd_wz (rad/s).
+
+Action space = 6D. Obs = 41D. See suspension_env_cfg.py for full layout.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
     def __init__(self, cfg: TarantulaSuspensionEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Friction domain randomization (PhysX tensor API, same as v4)
+        # Friction domain randomization (PhysX tensor API).
         lo, hi = self.cfg.friction_range
         ranges = torch.tensor([[lo, hi], [lo, hi]], device="cpu")
         self._friction_buckets = sample_uniform(
@@ -68,20 +73,36 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             [f"wheel_{leg}_joint" for leg in LEGS], preserve_order=True
         )
 
-        # v5: 12D action (6 susp + 6 wheel), no kinematic mapping constants needed
-        self._actions = torch.zeros(self.num_envs, 12, device=self.device)
-        self._previous_actions = torch.zeros(self.num_envs, 12, device=self.device)
-        self._move_cmd = torch.zeros(self.num_envs, device=self.device)
-        self._heading_rate_cmd = torch.zeros(self.num_envs, device=self.device)
+        # Stage A: 6D wheel action. Suspension is held at neutral target.
+        self._actions = torch.zeros(self.num_envs, 6, device=self.device)
+        self._previous_actions = torch.zeros(self.num_envs, 6, device=self.device)
+        self._cmd_vx = torch.zeros(self.num_envs, device=self.device)
+        self._cmd_wz = torch.zeros(self.num_envs, device=self.device)
+        self._episode_sums = {
+            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+            for key in [
+                "tracking_lin_vel",
+                "tracking_yaw_rate",
+                "orientation",
+                "lin_vel_z",
+                "ang_vel_xy",
+                "action_rate",
+                "action_magnitude",
+                "joint_limit",
+                "alive",
+                "termination",
+                "total",
+            ]
+        }
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self._imu = Imu(self.cfg.imu)
         self.scene.sensors["imu"] = self._imu
-        # Wheel contact sensors: fl/fr/ml/mr/rl/rr alphabetical = LEGS order
-        self._wheel_contacts = ContactSensor(self.cfg.wheel_contacts)
-        self.scene.sensors["wheel_contacts"] = self._wheel_contacts
+        # Wheel-load sensors: fl/fr/ml/mr/rl/rr alphabetical = LEGS order
+        self._wheel_load_sensors = ContactSensor(self.cfg.wheel_loads)
+        self.scene.sensors["wheel_loads"] = self._wheel_load_sensors
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -115,11 +136,14 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             self._push_countdown[push_envs] = torch.randint(slo, shi, (n,), device=self.device)
 
     def _apply_action(self) -> None:
-        # v5: direct per-joint control, no kinematic mapping
-        susp = self._actions[:, 0:6] * self.cfg.action_scale_susp
+        susp = torch.full(
+            (self.num_envs, 6),
+            float(self.cfg.stand_susp_target),
+            device=self.device,
+        )
         self._robot.set_joint_position_target(susp.clamp(-0.6, 0.6), joint_ids=self._susp_joint_ids)
 
-        wheel = self._actions[:, 6:12] * self.cfg.action_scale_wheel_omega
+        wheel = self._actions * self.cfg.action_scale_wheel_omega
         self._robot.set_joint_velocity_target(wheel, joint_ids=self._wheel_joint_ids)
 
     def _get_observations(self) -> dict:
@@ -127,9 +151,9 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         susp_joint_vel = self._robot.data.joint_vel[:, self._susp_joint_ids]
         wheel_joint_vel = self._robot.data.joint_vel[:, self._wheel_joint_ids]
 
-        # Wheel contact: net force magnitude > threshold -> boolean (N, 6)
-        contact_forces = self._wheel_contacts.data.net_forces_w_history[:, 0]  # (N, 6, 3)
-        in_contact = (contact_forces.norm(dim=-1) > self.cfg.contact_force_threshold).float()
+        # Wheel load: net force magnitude normalized by nominal wheel load.
+        contact_forces = self._wheel_load_sensors.data.net_forces_w_history[:, 0]  # (N, 6, 3)
+        wheel_load = torch.clamp(contact_forces.norm(dim=-1) / self.cfg.nominal_wheel_load, 0.0, 3.0)
 
         obs = torch.cat(
             (
@@ -139,63 +163,112 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 susp_joint_pos,                         # 6
                 susp_joint_vel,                         # 6
                 wheel_joint_vel,                        # 6
-                in_contact,                             # 6  <- new
-                self._move_cmd.unsqueeze(-1),           # 1
-                self._heading_rate_cmd.unsqueeze(-1),   # 1
-                self._actions,                          # 12 (prev_action after this step)
+                wheel_load,                             # 6
+                self._cmd_vx.unsqueeze(-1),             # 1
+                self._cmd_wz.unsqueeze(-1),             # 1
+                self._previous_actions,                 # 6
             ),
             dim=-1,
-        )  # total: 47
+        )  # total: 41
         self._previous_actions = self._actions.clone()
         if self.cfg.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * self.cfg.obs_noise_std
         return {"policy": obs}
 
-    def _get_rewards(self) -> torch.Tensor:
+    def _termination_terms(self) -> dict[str, torch.Tensor]:
+        roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
+        root_pos_w = self._robot.data.root_pos_w
+        root_lin_vel_w = self._robot.data.root_lin_vel_w
+        root_ang_vel_w = self._robot.data.root_ang_vel_w
+
+        x_min, x_max, y_min, y_max = self._terrain.terrain_bounds
+        out_of_bounds = (
+            (root_pos_w[:, 0] < x_min + self.cfg.episode_bounds_margin)
+            | (root_pos_w[:, 0] > x_max - self.cfg.episode_bounds_margin)
+            | (root_pos_w[:, 1] < y_min + self.cfg.episode_bounds_margin)
+            | (root_pos_w[:, 1] > y_max - self.cfg.episode_bounds_margin)
+        )
+        bad_height = (
+            (root_pos_w[:, 2] < self.cfg.episode_min_base_height)
+            | (root_pos_w[:, 2] > self.cfg.episode_max_base_height)
+        )
+        bad_velocity = (
+            torch.linalg.norm(root_lin_vel_w, dim=-1) > self.cfg.episode_max_lin_vel
+        ) | (
+            torch.linalg.norm(root_ang_vel_w, dim=-1) > self.cfg.episode_max_ang_vel
+        )
+        bad_tilt = (roll**2 + pitch**2) > (self.cfg.episode_tilt_limit**2)
+        non_finite = (
+            ~torch.isfinite(root_pos_w).all(dim=-1)
+            | ~torch.isfinite(root_lin_vel_w).all(dim=-1)
+            | ~torch.isfinite(root_ang_vel_w).all(dim=-1)
+            | ~torch.isfinite(self._actions).all(dim=-1)
+        )
+        return {
+            "tilt": bad_tilt,
+            "height": bad_height,
+            "velocity": bad_velocity,
+            "bounds": out_of_bounds,
+            "non_finite": non_finite,
+        }
+
+    def _termination_flags(self) -> torch.Tensor:
+        terms = self._termination_terms()
+        return torch.stack(tuple(terms.values()), dim=0).any(dim=0)
+
+    def _reward_terms(self) -> dict[str, torch.Tensor]:
         roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=-1)
-
-        tilt_sq = torch.square(roll) + torch.square(pitch)
-        attitude_reward = torch.exp(-tilt_sq / (self.cfg.reward_attitude_sigma**2))
+        action_magnitude = torch.sum(torch.square(self._actions), dim=-1)
 
         ang_vel_b = self._robot.data.root_ang_vel_b
         lin_vel_b = self._robot.data.root_lin_vel_b
 
-        lo, hi = self.cfg.target_speed_range
         v_x = lin_vel_b[:, 0]
-        band_err = torch.clamp(lo - v_x, min=0.0) + torch.clamp(v_x - hi, min=0.0)
-        stop_err = torch.abs(v_x)
-        move = self._move_cmd
-        vel_err = move * band_err + (1.0 - move) * stop_err
-        vel_sigma = move * self.cfg.reward_velocity_sigma_move + (1.0 - move) * self.cfg.reward_velocity_sigma_stop
-        velocity_reward = torch.exp(-torch.square(vel_err / vel_sigma))
-
-        yaw_rate_err = ang_vel_b[:, 2] - self._heading_rate_cmd
-        yaw_rate_reward = torch.exp(-torch.square(yaw_rate_err / self.cfg.reward_yaw_rate_sigma))
-
-        # Contact reward: fraction of wheels touching the ground (0-1)
-        contact_forces = self._wheel_contacts.data.net_forces_w_history[:, 0]  # (N, 6, 3)
-        in_contact = (contact_forces.norm(dim=-1) > self.cfg.contact_force_threshold).float()
-        contact_frac = in_contact.mean(dim=-1)
-
-        terminated = (torch.square(roll) + torch.square(pitch)) > (self.cfg.episode_tilt_limit ** 2)
-
-        reward = (
-            self.cfg.reward_attitude_weight   * attitude_reward
-            + self.cfg.reward_velocity_weight * velocity_reward
-            + self.cfg.reward_yaw_rate_weight * yaw_rate_reward
-            + self.cfg.reward_contact_weight  * contact_frac
-            - self.cfg.reward_ang_vel_xy_weight * torch.sum(torch.square(ang_vel_b[:, :2]), dim=-1)
-            - self.cfg.reward_lin_vel_z_weight  * torch.square(lin_vel_b[:, 2])
-            - self.cfg.reward_action_rate_weight * action_rate
-            + self.cfg.reward_alive_bonus
-            - self.cfg.reward_fall_penalty * terminated.float()
+        target_v_x = self._cmd_vx
+        tracking_lin_vel = torch.exp(
+            -torch.square(v_x - target_v_x) / (self.cfg.reward_tracking_lin_vel_sigma**2)
         )
+
+        yaw_rate_err = ang_vel_b[:, 2] - self._cmd_wz
+        tracking_yaw_rate = torch.exp(
+            -torch.square(yaw_rate_err) / (self.cfg.reward_tracking_yaw_rate_sigma**2)
+        )
+
+        orientation_err = torch.square(roll) + torch.square(pitch)
+        orientation_reward = torch.exp(
+            -orientation_err / (self.cfg.reward_orientation_sigma**2)
+        )
+
+        susp_joint_pos = self._robot.data.joint_pos[:, self._susp_joint_ids]
+        soft_limit_margin = torch.clamp(torch.abs(susp_joint_pos) - 0.52, min=0.0)
+        joint_limit_penalty = torch.sum(torch.square(soft_limit_margin), dim=-1)
+
+        terminated = self._termination_flags()
+
+        return {
+            "tracking_lin_vel": self.cfg.reward_tracking_lin_vel_weight * tracking_lin_vel,
+            "tracking_yaw_rate": self.cfg.reward_tracking_yaw_rate_weight * tracking_yaw_rate,
+            "orientation": self.cfg.reward_orientation_weight * orientation_reward,
+            "ang_vel_xy": -self.cfg.reward_ang_vel_xy_weight * torch.sum(torch.square(ang_vel_b[:, :2]), dim=-1),
+            "lin_vel_z": -self.cfg.reward_lin_vel_z_weight * torch.square(lin_vel_b[:, 2]),
+            "action_rate": -self.cfg.reward_action_rate_weight * action_rate,
+            "action_magnitude": -self.cfg.reward_action_magnitude_weight * action_magnitude,
+            "joint_limit": -self.cfg.reward_joint_limit_weight * joint_limit_penalty,
+            "alive": torch.full((self.num_envs,), self.cfg.reward_alive_bonus, device=self.device),
+            "termination": -self.cfg.reward_termination_penalty * terminated.float(),
+        }
+
+    def _get_rewards(self) -> torch.Tensor:
+        reward_terms = self._reward_terms()
+        reward = torch.sum(torch.stack(tuple(reward_terms.values()), dim=0), dim=0)
+        for key, value in reward_terms.items():
+            self._episode_sums[key] += value
+        self._episode_sums["total"] += reward
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
-        terminated = (roll**2 + pitch**2) > (self.cfg.episode_tilt_limit**2)
+        terminated = self._termination_flags()
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, time_out
 
@@ -222,6 +295,22 @@ class TarantulaSuspensionEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
+
+        extras = {}
+        denom = max(float(self.max_episode_length), 1.0)
+        for key in self._episode_sums.keys():
+            extras[f"Episode_Reward/{key}"] = torch.mean(self._episode_sums[key][env_ids]) / denom
+            self._episode_sums[key][env_ids] = 0.0
+
+        # The first reset happens before the robot is placed on generated terrain
+        # origins, so termination terms from zero-length episodes are not useful.
+        logged_env_ids = env_ids[self.episode_length_buf[env_ids] > 0]
+        term_terms = self._termination_terms()
+        for key, value in term_terms.items():
+            extras[f"Episode_Termination/{key}"] = torch.count_nonzero(value[logged_env_ids]).item()
+        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[logged_env_ids]).item()
+        self.extras["log"] = extras
+
         super()._reset_idx(env_ids)
 
         self._randomize_friction(env_ids)
@@ -240,6 +329,11 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
 
-        self._move_cmd[env_ids] = (torch.rand(len(env_ids), device=self.device) < self.cfg.move_prob).float()
-        hr_lo, hr_hi = self.cfg.heading_rate_range
-        self._heading_rate_cmd[env_ids] = torch.rand(len(env_ids), device=self.device) * (hr_hi - hr_lo) + hr_lo
+        n = len(env_ids)
+        vx_lo, vx_hi = self.cfg.command_vx_range
+        wz_lo, wz_hi = self.cfg.command_wz_range
+        self._cmd_vx[env_ids] = torch.rand(n, device=self.device) * (vx_hi - vx_lo) + vx_lo
+        self._cmd_wz[env_ids] = torch.rand(n, device=self.device) * (wz_hi - wz_lo) + wz_lo
+        stop_mask = torch.rand(n, device=self.device) < self.cfg.command_stop_prob
+        self._cmd_vx[env_ids[stop_mask]] = 0.0
+        self._cmd_wz[env_ids[stop_mask]] = 0.0

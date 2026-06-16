@@ -8,15 +8,17 @@
      Isaac Lab 导入：
        xacro tarantula_core.urdf.xacro > tarantula.urdf          # 带 LiDAR
        xacro tarantula_core.urdf.xacro lidar:=false > bare.urdf  # 裸底盘
-     悬挂物理弹簧 k=120 Nm/rad、阻尼 c=8 在 Isaac 中映射为关节
-     drive 的 stiffness/damping（隐式 PD，与 Gazebo
-     implicitSpringDamper 同角色），见 docs §7。
+       xacro tarantula_core.urdf.xacro wheel_collision:=cylinder # 圆柱 collision A/B
+     悬挂执行器等效参数 kp=120 Nm/rad、kd=8 Nms/rad 在 Isaac 中映射为
+     关节 drive 的 stiffness/damping；Gazebo 部署侧由策略节点显式计算
+     受限 PD 力矩，不再依赖 Gazebo-only joint spring。
      ============================================================ -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
 
   <xacro:include filename="$(find tarantula_description)/urdf/tarantula_chassis.xacro"/>
 
-  <xacro:tarantula_chassis prefix=""/>
+  <xacro:arg name="wheel_collision" default="sphere"/>
+  <xacro:tarantula_chassis prefix="" wheel_collision="$(arg wheel_collision)"/>
 
   <!-- ============ LiDAR 载荷（可选，挂 payload_mount） ============ -->
   <xacro:arg name="lidar" default="true"/>
@@ -39,7 +41,7 @@
     <joint name="lidar_joint" type="fixed">
       <parent link="payload_mount"/>
       <child link="lidar_link"/>
-      <!-- 安装板顶面(0.092) + 0.078 = 0.17，与历史 LiDAR 世界位姿严格一致 -->
+      <!-- 安装板顶面(0.092) + 0.078 = 0.17 -->
       <origin xyz="0.22 0 0.078"/>
     </joint>
   </xacro:if>

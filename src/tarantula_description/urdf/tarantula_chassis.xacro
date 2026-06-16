@@ -22,19 +22,31 @@
   <xacro:property name="body_width"   value="0.36"/>
   <xacro:property name="body_height"  value="0.10"/>
   <xacro:property name="body_mass"    value="18.0"/>
+  <!-- COM 显式参数化，便于 Isaac/Gazebo 域随机化和载荷敏感性实验对齐。 -->
+  <xacro:property name="body_com_x"   value="0.0"/>
+  <xacro:property name="body_com_y"   value="0.0"/>
+  <xacro:property name="body_com_z"   value="-0.025"/>
+  <!-- 物理碰撞略小于视觉外壳，避免托底/擦边时用装饰外形参与接触。 -->
+  <xacro:property name="belly_length" value="0.70"/>
+  <xacro:property name="belly_width"  value="0.30"/>
+  <xacro:property name="belly_height" value="0.08"/>
+  <xacro:property name="belly_z"      value="0.015"/>
 
   <xacro:property name="arm_length"   value="0.22"/>   <!-- 悬挂摆臂长度 -->
   <xacro:property name="arm_mass"     value="0.8"/>
   <xacro:property name="arm_angle"    value="0.698"/>  <!-- 摆臂下倾 40 度 -->
 
-  <xacro:property name="wheel_radius" value="0.12"/>
-  <xacro:property name="wheel_width"  value="0.07"/>
-  <xacro:property name="wheel_mass"   value="1.5"/>
+  <xacro:property name="wheel_radius" value="0.13"/>
+  <xacro:property name="wheel_width"  value="0.075"/>
+  <xacro:property name="wheel_mass"   value="1.7"/>
+  <!-- 轮胎视觉保持圆柱。碰撞体默认用 sphere；cylinder 仅保留为已知失败对照。 -->
+  <xacro:property name="wheel_collision_radius" value="${wheel_radius}"/>
 
-  <!-- 悬挂物理弹簧/阻尼（被动层硬件参数，主动控制的前馈刚度必须与 k 一致） -->
-  <xacro:property name="susp_spring_k"  value="120.0"/> <!-- Nm/rad -->
-  <xacro:property name="susp_damping"   value="8.0"/>   <!-- Nms/rad -->
-  <xacro:property name="susp_friction"  value="0.1"/>
+  <!-- 悬挂执行器等效 PD 参数。论文式 RL 部署不依赖 Gazebo-only joint spring，
+       Gazebo/Isaac 都应通过受限执行器把目标角转换为力矩。 -->
+  <xacro:property name="susp_actuator_kp" value="130.0"/> <!-- Nm/rad -->
+  <xacro:property name="susp_damping"   value="11.0"/>  <!-- Nms/rad -->
+  <xacro:property name="susp_friction"  value="0.08"/>
 
   <!-- 蜘蛛站姿：前腿朝前(dir=+1)、中后腿朝后(dir=-1)，六轮均布 x=+0.51/0/-0.51 -->
   <xacro:property name="pivot_x"      value="0.34"/>
@@ -77,14 +89,14 @@
   <!-- id: fl/fr/ml/mr/rl/rr；side: 1=左/-1=右；dir: 1=摆臂朝前/-1=朝后。
        悬挂关节绕 y 轴，轮关节绕 y 轴连续转动。
        注意：dir 决定关节角与轮子升降的方向关系，控制节点 DIR 表必须一致。 -->
-  <xacro:macro name="leg" params="prefix id x side dir">
+  <xacro:macro name="leg" params="prefix id x side dir wheel_collision">
 
     <joint name="${prefix}susp_${id}_joint" type="revolute">
       <parent link="${prefix}base_link"/>
       <child link="${prefix}arm_${id}_link"/>
       <origin xyz="${x} ${side*pivot_y} ${pivot_z}" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
-      <limit lower="-0.6" upper="0.6" effort="60" velocity="6"/>
+      <limit lower="-0.6" upper="0.6" effort="75" velocity="6"/>
       <!-- 阻尼放物理侧（无控制延迟），软件 PD 的 kd 对延迟敏感不可依赖 -->
       <dynamics damping="${susp_damping}" friction="${susp_friction}"/>
     </joint>
@@ -124,8 +136,8 @@
       <child link="${prefix}wheel_${id}_link"/>
       <origin xyz="${dir*arm_length*cos(arm_angle)} ${side*0.065} ${-arm_length*sin(arm_angle)}"/>
       <axis xyz="0 1 0"/>
-      <limit effort="30" velocity="30"/>
-      <dynamics damping="0.1"/>
+      <limit effort="38" velocity="30"/>
+      <dynamics damping="0.08"/>
     </joint>
 
     <link name="${prefix}wheel_${id}_link">
@@ -139,10 +151,17 @@
         <geometry><cylinder radius="0.055" length="${wheel_width + 0.005}"/></geometry>
         <xacro:mat_hub/>
       </visual>
-      <collision>
-        <origin rpy="${PI/2} 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
-      </collision>
+      <xacro:if value="${wheel_collision == 'sphere'}">
+        <collision name="wheel_${id}_contact_collision">
+          <geometry><sphere radius="${wheel_collision_radius}"/></geometry>
+        </collision>
+      </xacro:if>
+      <xacro:if value="${wheel_collision == 'cylinder'}">
+        <collision name="wheel_${id}_contact_collision">
+          <origin rpy="${PI/2} 0 0"/>
+          <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        </collision>
+      </xacro:if>
       <inertial>
         <origin rpy="${PI/2} 0 0"/>
         <mass value="${wheel_mass}"/>
@@ -152,7 +171,7 @@
   </xacro:macro>
 
   <!-- ============ 底盘模块宏 ============ -->
-  <xacro:macro name="tarantula_chassis" params="prefix:=''">
+  <xacro:macro name="tarantula_chassis" params="prefix:='' wheel_collision:='sphere'">
 
     <!-- 车身：主舱 + 载荷安装板（支撑柱架高的平整安装面）+ 两侧悬挂安装梁
          + 前保险杠（方向标识）。视觉语言对标 Husky/Scout 类模块化底盘：
@@ -186,10 +205,12 @@
         <geometry><box size="${body_length} 0.05 0.07"/></geometry>
         <xacro:mat_accent/>
       </visual>
-      <collision>
-        <geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry>
+      <collision name="base_belly_collision">
+        <origin xyz="0 0 ${belly_z}"/>
+        <geometry><box size="${belly_length} ${belly_width} ${belly_height}"/></geometry>
       </collision>
       <inertial>
+        <origin xyz="${body_com_x} ${body_com_y} ${body_com_z}"/>
         <mass value="${body_mass}"/>
         <xacro:box_inertia m="${body_mass}" x="${body_length}" y="${body_width}" z="${body_height}"/>
       </inertial>
@@ -218,12 +239,12 @@
     </joint>
 
     <!-- 六条腿 -->
-    <xacro:leg prefix="${prefix}" id="fl" x="${pivot_x}"  side="1"  dir="1"/>
-    <xacro:leg prefix="${prefix}" id="fr" x="${pivot_x}"  side="-1" dir="1"/>
-    <xacro:leg prefix="${prefix}" id="ml" x="${pivot_mx}" side="1"  dir="-1"/>
-    <xacro:leg prefix="${prefix}" id="mr" x="${pivot_mx}" side="-1" dir="-1"/>
-    <xacro:leg prefix="${prefix}" id="rl" x="${-pivot_x}" side="1"  dir="-1"/>
-    <xacro:leg prefix="${prefix}" id="rr" x="${-pivot_x}" side="-1" dir="-1"/>
+    <xacro:leg prefix="${prefix}" id="fl" x="${pivot_x}"  side="1"  dir="1"  wheel_collision="${wheel_collision}"/>
+    <xacro:leg prefix="${prefix}" id="fr" x="${pivot_x}"  side="-1" dir="1"  wheel_collision="${wheel_collision}"/>
+    <xacro:leg prefix="${prefix}" id="ml" x="${pivot_mx}" side="1"  dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:leg prefix="${prefix}" id="mr" x="${pivot_mx}" side="-1" dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:leg prefix="${prefix}" id="rl" x="${-pivot_x}" side="1"  dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:leg prefix="${prefix}" id="rr" x="${-pivot_x}" side="-1" dir="-1" wheel_collision="${wheel_collision}"/>
   </xacro:macro>
 
 </robot>

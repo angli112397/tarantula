@@ -2,14 +2,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Tarantula Isaac Lab environments."""
 
-import gymnasium as gym
+try:
+    import gymnasium as gym
+except ModuleNotFoundError:
+    gym = None
 
-gym.register(
-    id="Isaac-Tarantula-Suspension-v0",
-    entry_point=f"{__name__}.suspension_env:TarantulaSuspensionEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.suspension_env_cfg:TarantulaSuspensionEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:TarantulaSuspensionPPORunnerCfg",
-    },
-)
+if gym is not None and "Isaac-Tarantula-Suspension-v0" not in gym.registry:
+    gym.register(
+        id="Isaac-Tarantula-Suspension-v0",
+        entry_point=f"{__name__}.suspension_env:TarantulaSuspensionEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.suspension_env_cfg:TarantulaSuspensionEnvCfg",
+            "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:TarantulaSuspensionPPORunnerCfg",
+        },
+    )

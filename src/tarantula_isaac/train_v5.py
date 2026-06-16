@@ -8,6 +8,10 @@ Usage (from repo root, with isaac_venv active):
 
 import argparse
 import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TERRAIN_DIR = REPO_ROOT / "generated" / "terrains" / "gazebo_demo" / "42"
 
 from isaaclab.app import AppLauncher
 
@@ -15,6 +19,11 @@ parser = argparse.ArgumentParser(description="M7 v5 PPO training")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--max_iterations", type=int, default=400)
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to warm-start from")
+parser.add_argument(
+    "--terrain-dir",
+    default=str(DEFAULT_TERRAIN_DIR),
+    help="Generated terrain directory containing height.npy and metadata.json.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.headless = True  # always headless for training
@@ -39,6 +48,7 @@ _RSL_RL_VERSION = _meta.version("rsl-rl-lib")
 # Our env + cfg — imports fine after AppLauncher
 from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
 from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
+from tarantula_isaac.shared_heightmap_terrain import make_shared_heightmap_terrain_cfg
 from tarantula_isaac.agents.rsl_rl_ppo_cfg import TarantulaSuspensionPPORunnerCfg
 from tarantula_isaac.robot import ensure_tarantula_usd
 
@@ -53,14 +63,17 @@ def main():
 
     env_cfg = TarantulaSuspensionEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
+    env_cfg.terrain = make_shared_heightmap_terrain_cfg(args.terrain_dir)
 
     agent_cfg = TarantulaSuspensionPPORunnerCfg()
     agent_cfg.max_iterations = args.max_iterations
+    if args.max_iterations <= 5:
+        agent_cfg.save_interval = 1
     agent_cfg.device = "cuda:0"
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _RSL_RL_VERSION)
 
     log_root = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_v5_stage_a"
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_v5_stage_a_wheel_only"
     log_dir = os.path.join(log_root, log_dir)
     os.makedirs(log_dir, exist_ok=True)
     print(f"[INFO] Logging to: {log_dir}")

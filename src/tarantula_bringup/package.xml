@@ -2,7 +2,7 @@
 <package format="3">
   <name>tarantula_bringup</name>
   <version>0.1.0</version>
-  <description>Launch files, controller configs and simulation worlds for the Tarantula chassis</description>
+  <description>Launch files and controller configs for the Tarantula chassis</description>
   <maintainer email="angli23@yahoo.com">ang</maintainer>
   <license>MIT</license>
 

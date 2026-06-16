@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M7 v5 PPO training — from scratch (obs=47, action=12, per-joint direct control)
+# M7 v5 PPO training - Stage A wheel-only from scratch (obs=41, action=6)
 # Usage: bash scripts/run_ppo_train_v5.sh [--resume /path/to/checkpoint]
 set -uo pipefail
 

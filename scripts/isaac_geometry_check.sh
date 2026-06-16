@@ -4,11 +4,12 @@
 # Rerun this after any tarantula_chassis.xacro / robot.py change.
 set -uo pipefail
 source ~/isaac_venv/bin/activate
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export OMNI_KIT_ACCEPT_EULA=Y
-export PYTHONPATH="/home/ang/Documents/tarantula/src:/home/ang/Documents/tarantula/src/tarantula_control:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}/src/tarantula_control:${PYTHONPATH:-}"
 
 LOG=/tmp/isaac_geometry_check.log
-python3 -u /home/ang/Documents/tarantula/src/tarantula_isaac/geometry_check.py > "$LOG" 2>&1 &
+python3 -u "${REPO_ROOT}/src/tarantula_isaac/geometry_check.py" > "$LOG" 2>&1 &
 PID=$!
 LIMIT_KB=$((12*1024*1024))  # 12GB RSS safety cap (15GB RAM + 15GB swap)
 for i in $(seq 1 300); do
