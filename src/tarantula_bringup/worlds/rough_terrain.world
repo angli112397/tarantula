@@ -1,8 +1,43 @@
 <?xml version="1.0"?>
 <sdf version="1.6">
   <world name="rough_terrain">
-    <include><uri>model://sun</uri></include>
-    <include><uri>model://ground_plane</uri></include>
+    <!-- Ignition 不会自动加载 Sensors/Imu/ForceTorque，需显式声明全部 system plugin。
+         UserCommands 必须在传感器系统之前声明——否则 spawn 服务创建实体的
+         PreUpdate 晚于传感器系统的 EachNew 扫描，传感器系统会错过新实体
+         （gz-sim issue #1245：spawn 模型上的传感器 topic 不出现）。 -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-forcetorque-system" name="ignition::gazebo::systems::ForceTorque"/>
+    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+
+    <!-- model://sun 与 model://ground_plane 走 Fuel 解析，在 Ignition 下
+         无法离线获取（Error Code 13），改为内联定义 -->
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient><diffuse>0.8 0.8 0.8 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
 
     <physics type="ode">
       <max_step_size>0.001</max_step_size>
@@ -32,13 +67,14 @@
       </link>
     </model>
 
-    <!-- 单侧台阶：只有左轮压上，考验侧倾调平 -->
+    <!-- 单侧台阶：只有左轮压上，考验侧倾调平。
+         高度需 < 轮半径(0.12m) 才能爬上，否则纯轮式无法在无辅助情况下越过。 -->
     <model name="half_step_1">
       <static>true</static>
-      <pose>4.2 0.45 0.05 0 0 0</pose>
+      <pose>4.2 0.45 0.025 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>1.2 0.9 0.10</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>1.2 0.9 0.10</size></box></geometry>
+        <collision name="c"><geometry><box><size>1.2 0.9 0.05</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.9 0.05</size></box></geometry>
           <material><ambient>0.4 0.4 0.45 1</ambient><diffuse>0.4 0.4 0.45 1</diffuse></material></visual>
       </link>
     </model>
@@ -46,10 +82,10 @@
     <!-- 单侧台阶（右） -->
     <model name="half_step_2">
       <static>true</static>
-      <pose>6.0 -0.45 0.06 0 0 0</pose>
+      <pose>6.0 -0.45 0.03 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>1.2 0.9 0.12</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>1.2 0.9 0.12</size></box></geometry>
+        <collision name="c"><geometry><box><size>1.2 0.9 0.06</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.9 0.06</size></box></geometry>
           <material><ambient>0.4 0.4 0.45 1</ambient><diffuse>0.4 0.4 0.45 1</diffuse></material></visual>
       </link>
     </model>

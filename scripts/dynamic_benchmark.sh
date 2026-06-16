@@ -46,7 +46,7 @@ run_phase() {  # $1=leveling true/false  $2=标题
   drive_and_measure
   kill $LP 2>/dev/null
   sleep 4
-  pkill -f gzserver 2>/dev/null; pkill -f active_suspension 2>/dev/null
+  pkill -f "ign gazebo" 2>/dev/null; pkill -f active_suspension 2>/dev/null
   sleep 3
 }
 

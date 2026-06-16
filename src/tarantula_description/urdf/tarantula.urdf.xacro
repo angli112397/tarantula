@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <!-- ============================================================
-     Gazebo Classic 适配层：include 本体（tarantula_core）后叠加
-     仿真器专属内容——物理弹簧标签、轮胎接触参数、传感器插件、
-     ros2_control。本体改动一律改 tarantula_core.urdf.xacro，
-     此文件只关心 Gazebo 的事。
+     Gazebo Ignition (gz-sim) 适配层：include 本体（tarantula_core）后叠加
+     仿真器专属内容——物理弹簧标签、轮胎接触参数、传感器、
+     ros2_control（经 gz_ros2_control）。本体改动一律改
+     tarantula_core.urdf.xacro，此文件只关心 Gazebo 的事。
      ============================================================ -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
 
@@ -13,36 +13,57 @@
   <xacro:macro name="leg_gazebo" params="prefix">
 
     <!-- 物理弹簧（被动悬挂硬件）：控制器未上线时车也能站立。
-         k 取自 core 的 susp_spring_k，与前馈刚度 ff_stiffness 严格一致 -->
+         k 取自 core 的 susp_spring_k，与前馈刚度 ff_stiffness 严格一致。
+         sdformat 将其转换为 SDF <axis><dynamics><spring_stiffness>/
+         <spring_reference>，dartsim 支持隐式弹簧阻尼。 -->
     <gazebo reference="susp_${prefix}_joint">
       <springStiffness>${susp_spring_k}</springStiffness>
       <springReference>0.0</springReference>
       <implicitSpringDamper>true</implicitSpringDamper>
+      <!-- 力/力矩传感器（存在性验证）：child(摆臂)对parent(车身)的反作用力，
+           用车身坐标表达——force.z 即该腿对车身的支撑力，>0 大致表示着地 -->
+      <sensor name="ft_${prefix}" type="force_torque">
+        <update_rate>50</update_rate>
+        <topic>ft/${prefix}</topic>
+        <force_torque>
+          <frame>parent</frame>
+          <measure_direction>child_to_parent</measure_direction>
+        </force_torque>
+      </sensor>
     </gazebo>
 
-    <!-- 轮胎接触参数 + 足端压力（接触）传感器 -->
+    <!-- 轮胎接触参数 -->
     <gazebo reference="wheel_${prefix}_link">
       <mu1>1.2</mu1>
       <mu2>0.8</mu2>
       <kp>1000000.0</kp>
       <kd>100.0</kd>
-      <material>Gazebo/FlatBlack</material>
-      <sensor name="contact_${prefix}" type="contact">
+    </gazebo>
+
+    <!-- 轮轴力/力矩传感器（验证用）：child(轮)对parent(摆臂)的反作用力，摆臂坐标表达。
+         轮子无弹簧、惯量远小于摆臂，理论上比髋关节 ft_${prefix} 更接近纯地面接触力，
+         用于对比噪声特征，暂不接入控制逻辑。 -->
+    <gazebo reference="wheel_${prefix}_joint">
+      <sensor name="ft_wheel_${prefix}" type="force_torque">
         <update_rate>50</update_rate>
-        <contact>
-          <collision>wheel_${prefix}_link_collision</collision>
-        </contact>
-        <plugin name="bumper_${prefix}" filename="libgazebo_ros_bumper.so">
-          <ros>
-            <remapping>bumper_states:=contact/${prefix}</remapping>
-          </ros>
-          <frame_name>wheel_${prefix}_link</frame_name>
-        </plugin>
+        <topic>ft_wheel/${prefix}</topic>
+        <force_torque>
+          <frame>parent</frame>
+          <measure_direction>child_to_parent</measure_direction>
+        </force_torque>
       </sensor>
     </gazebo>
 
-    <gazebo reference="arm_${prefix}_link">
-      <material>Gazebo/Orange</material>
+    <!-- 几何接触传感器（地面真值）：wheel_${prefix}_link 的碰撞体是否与任意几何体接触，
+         与力/力矩信号在数值上无关——用于核查 force.z>阈值 是否真的对应"轮子着地"。 -->
+    <gazebo reference="wheel_${prefix}_link">
+      <sensor name="contact_${prefix}" type="contact">
+        <update_rate>50</update_rate>
+        <topic>contact/${prefix}</topic>
+        <contact>
+          <collision>wheel_${prefix}_link_collision</collision>
+        </contact>
+      </sensor>
     </gazebo>
   </xacro:macro>
 
@@ -54,9 +75,9 @@
   <xacro:leg_gazebo prefix="rr"/>
 
   <!-- ============ ros2_control ============ -->
-  <ros2_control name="GazeboSystem" type="system">
+  <ros2_control name="GazeboSimSystem" type="system">
     <hardware>
-      <plugin>gazebo_ros2_control/GazeboSystem</plugin>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
     </hardware>
 
     <xacro:macro name="susp_iface" params="prefix">
@@ -92,7 +113,7 @@
 
   <!-- ============ Gazebo 插件 ============ -->
   <gazebo>
-    <plugin filename="libgazebo_ros2_control.so" name="gazebo_ros2_control">
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
       <parameters>$(find tarantula_bringup)/config/controllers.yaml</parameters>
     </plugin>
   </gazebo>
@@ -101,19 +122,15 @@
     <sensor name="imu_sensor" type="imu">
       <always_on>true</always_on>
       <update_rate>100</update_rate>
-      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
-        <ros>
-          <remapping>~/out:=imu/data</remapping>
-        </ros>
-        <frame_name>imu_link</frame_name>
-      </plugin>
+      <topic>imu</topic>
     </sensor>
   </gazebo>
 
   <gazebo reference="lidar_link">
-    <sensor name="lidar_sensor" type="ray">
+    <sensor name="lidar_sensor" type="gpu_lidar">
       <always_on>true</always_on>
       <update_rate>10</update_rate>
+      <topic>scan</topic>
       <ray>
         <scan>
           <horizontal>
@@ -128,18 +145,7 @@
           <resolution>0.01</resolution>
         </range>
       </ray>
-      <plugin name="lidar_plugin" filename="libgazebo_ros_ray_sensor.so">
-        <ros>
-          <remapping>~/out:=scan</remapping>
-        </ros>
-        <output_type>sensor_msgs/LaserScan</output_type>
-        <frame_name>lidar_link</frame_name>
-      </plugin>
     </sensor>
-  </gazebo>
-
-  <gazebo reference="base_link">
-    <material>Gazebo/DarkGrey</material>
   </gazebo>
 
 </robot>

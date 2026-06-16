@@ -5,7 +5,11 @@ Isaac Lab 不走本文件：env 直接 import suspension_core（见其模块文�
 话题：
   入  /imu/data                         姿态/角速度（外环反馈）
   入  /joint_states                     悬挂关节角（遥测/守门）
-  入  contact/{fl..rr}                  轮地接触（M1 接触保持，默认未启用）
+  入  /ft_wheel/{fl..rr}  geometry_msgs/Wrench 轮轴力/力矩传感器
+                                        （M1 接触保持判据：|F| > 阈值=着地；
+                                         髋关节 /ft/{leg} 受悬挂动力学影响，
+                                         force.z 在确认着地时仍频繁穿越0，
+                                         轮轴幅值与几何接触地面真值更一致）
   入  ~/body_cmd  Float64MultiArray     [roll_ref, pitch_ref, height_m]
                                         车身位姿指令（M2，动作面）
   出  /suspension_controller/commands   六腿前馈力矩
@@ -17,7 +21,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float64MultiArray
-from gazebo_msgs.msg import ContactsState
+from geometry_msgs.msg import Wrench
 
 from .suspension_core import (LEGS, SuspensionConfig, SuspensionController,
                               SuspensionInputs, config_fields, quat_roll_pitch)
@@ -37,6 +41,7 @@ class ActiveSuspension(Node):
 
         self.inputs = SuspensionInputs()
         self.joint_seen = False
+        self.joint_effort = {}  # 诊断用：leg -> susp_*_joint 力矩（N·m）
 
         self.cmd_pub = self.create_publisher(
             Float64MultiArray, '/suspension_controller/commands', 10)
@@ -46,28 +51,30 @@ class ActiveSuspension(Node):
         self.create_subscription(Float64MultiArray, '~/body_cmd', self.body_cb, 10)
         for leg in LEGS:
             self.create_subscription(
-                ContactsState, f'contact/{leg}',
-                lambda msg, leg=leg: self.contact_cb(leg, msg), 10)
+                Wrench, f'/ft_wheel/{leg}',
+                lambda msg, leg=leg: self.ft_wheel_cb(leg, msg), 10)
 
         self.dt = 1.0 / self.get_parameter('control_rate').value
         self._step = 0
         self.create_timer(self.dt, self.control_step)
-        self.get_logger().info('Active suspension started (core: v3 + M1/M2 channels).')
+        self.get_logger().info('Active suspension started (M1/M2 classical leveling path).')
 
     def imu_cb(self, msg: Imu):
         q = msg.orientation
         self.inputs.roll, self.inputs.pitch = quat_roll_pitch(q.w, q.x, q.y, q.z)
-        self.inputs.roll_rate = msg.angular_velocity.x
-        self.inputs.pitch_rate = msg.angular_velocity.y
 
     def joint_cb(self, msg: JointState):
         for i, name in enumerate(msg.name):
             if name.startswith('susp_') and name.endswith('_joint'):
-                self.inputs.joint_pos[name[5:-6]] = msg.position[i]
+                leg = name[5:-6]
+                self.inputs.joint_pos[leg] = msg.position[i]
+                if i < len(msg.effort):
+                    self.joint_effort[leg] = msg.effort[i]
         self.joint_seen = True
 
-    def contact_cb(self, leg, msg: ContactsState):
-        self.inputs.contacts[leg] = len(msg.states) > 0
+    def ft_wheel_cb(self, leg, msg: Wrench):
+        force_mag = (msg.force.x ** 2 + msg.force.y ** 2 + msg.force.z ** 2) ** 0.5
+        self.inputs.contacts[leg] = force_mag > self.ctrl.cfg.contact_force_threshold
 
     def body_cb(self, msg: Float64MultiArray):
         if len(msg.data) >= 3:
@@ -91,6 +98,10 @@ class ActiveSuspension(Node):
                    + [out.probe_dz[leg] for leg in LEGS]
                    + [out.height])
             self.debug_pub.publish(Float64MultiArray(data=dbg))
+            efforts = [self.joint_effort.get(leg, 0.0) for leg in LEGS]
+            self.get_logger().info(
+                'effort ' + ' '.join(f'{leg}={e:+.2f}' for leg, e in zip(LEGS, efforts)),
+                throttle_duration_sec=1.0)
 
 
 def main():

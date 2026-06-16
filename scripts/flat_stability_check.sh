@@ -37,5 +37,5 @@ EOF
 
 kill $LAUNCH_PID 2>/dev/null
 sleep 3
-pkill -f gzserver 2>/dev/null; pkill -f active_suspension 2>/dev/null
+pkill -f "ign gazebo" 2>/dev/null; pkill -f active_suspension 2>/dev/null
 echo "=== done ==="

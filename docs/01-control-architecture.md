@@ -12,7 +12,7 @@
 |---|---|
 | 平台 | 六轮单自由度摆臂悬挂 + 差速轮，仿"捕鸟蛛"构型 |
 | 目标 | 崎岖路面行驶时车身 roll/pitch 自稳（云台效果），静态斜坡调平 |
-| 技术栈 | ROS2 Humble + Gazebo Classic 11 + ros2_control |
+| 技术栈 | ROS2 Humble + Gazebo Sim (Ignition Fortress) + ros2_control |
 | 反馈 | IMU（姿态）+ 关节编码器；接触传感器仅做遥测展示 |
 | 约束 | 开发者为初学者、≤2 周交付演示、面试时每个环节可解释 |
 
@@ -67,17 +67,49 @@
 | G3 动态自稳 | 崎岖路 0.8 m/s | **RMS pitch 4.12°→3.00°（-27%），max pitch 10.28°→8.42°** ✓；roll 动态抑制受限（见已知限制①） |
 | G4 SLAM 集成 | 崎岖路建图 | slam_toolbox 成图（1145 占用格/25135 自由格）✓ |
 
+### dartsim 复测（2026-06-13，Ignition Fortress 迁移后）
+
+物理引擎从 ODE 换成 dartsim 后，用当前锁定参数重新跑 G1/G2/G3：
+
+| 阶段 | 场景 | dartsim 实测 |
+|---|---|---|
+| G1 平地 | 平地静止 44s | **0.14°，零漂移** ✓（与 ODE 0.05° 同级） |
+| G2 静态调平 | 8° 斜板 | **被动 8.28° / 主动 0.54°（消除 93.5%），5-6s 收敛（ODE 为 20s），yaw 全程 +0.1°，无自旋** ✓ |
+| G3 动态自稳 | 崎岖路 0.8 m/s | 主动 RMS roll=1.94°/pitch=2.05°，max roll=5.35°/pitch=6.41°；被动 RMS roll≈4.51° — roll 阻尼明显优于 ODE era |
+
+### 安全包络边界值复测（2026-06-13）
+
+ODE 时代翻车实验定界的三个值，在 dartsim + 100Hz 话题环下逐一复测
+（G2 静态调平 / G3 动态自稳，各单次跑），**均未复现翻车/自旋/雪崩**：
+
+| 参数 | ODE era 结论 | dartsim 复测结果 |
+|---|---|---|
+| `sky_roll_damp=0.45`（默认 0.15） | ~20ms 延迟下负阻尼翻车 | G3 主动 RMS roll=1.74°/pitch=1.84°（优于默认约 -10%），max roll=5.96°/pitch=7.09°（略差约 +11%）；无翻车/自旋 |
+| `target_slew_rate=0.06`（默认 0.20） | 静坡粘滑雪崩 | G2 收敛更快（t=1s 即开始下降，默认在 t=4s 才开始），5-6s 收敛到 0.58°（默认 0.54°），全程平滑无振荡，yaw 不变 |
+| `target_slew_rate=0.30`+`target_limit=0.55`（默认 0.20/0.45） | 撞 0.6 rad 硬限位翻车 | G2 收敛最快（2.6s 到 0.53°，优于默认 0.54°）；G3 主动 RMS roll=1.68°/pitch=1.88°、max roll=5.17°/pitch=5.77°（均优于默认）；两项测试均无撞限位/翻车 |
+
+**结论**：dartsim 的关节限位/接触阻尼明显比 ODE 更"宽容"，三个 ODE era
+翻车场景在 dartsim 下都表现为平滑收敛，且数值与当前默认值同级或略优。但
+本轮只做了单次跑、且每个候选值只在 G2 或 G3 单独验证，没有任何一组做满
+G1+G2+G3 全套回归，因此**暂不放宽 `suspension_core.py` 默认值**——按既定
+规则（放宽前必须 G1/G2 回归通过且明确变好），当前结论是"现有安全包络比
+实测所需更保守，M1/M2 调参可以在当前默认值上继续，不被这三条卡住"。
+`sky_roll_damp` 可显著放开这一点，方向上与 Phase 3/M6（kHz 内环目标）一致，
+留作 Isaac Lab 阶段的起点（届时配合完整 G1-G3 回归再决定是否改默认值）。
+
 ### 已知限制（实验定界）
 
-1. **roll 高频主动阻尼受话题链路延迟封顶**：车身 roll 惯量小、扰动频率高，
-   ~20ms 的 joint_states→节点→命令延迟使天棚阻尼系数 >0.15 时相位反转
-   （0.45 实测负阻尼翻车）。动态 roll 抑制需要 kHz 级插件内控制器
-   （真实产品悬挂 ECU 即如此），列为改进方向。
+1. **roll 高频主动阻尼受话题链路延迟封顶（ODE era）**：车身 roll 惯量小、
+   扰动频率高，~20ms 的 joint_states→节点→命令延迟使天棚阻尼系数 >0.15 时
+   相位反转（0.45 在 ODE 下实测负阻尼翻车）。动态 roll 抑制需要 kHz 级插件
+   内控制器（真实产品悬挂 ECU 即如此），列为改进方向。dartsim 下 0.45 复测
+   未翻车（见上文"安全包络边界值复测"），但未做完整回归，默认值暂不动。
 2. **俯仰调平杠杆比 3.0**：轴距半长 0.51 / 有效臂长 0.169，俯仰修正消耗
    3 倍关节行程，外环增益须按比例折减（roll 0.8/1.2，pitch 0.3/0.5）。
-3. **参数安全包络**（翻车实验定界）：target_limit ≤0.45（0.55 撞 0.6 硬限位）、
-   slew 0.2 rad/s（0.06 静坡粘滑雪崩、0.3 配大限幅撞限位）、
-   sky_roll_damp ≤0.15。
+3. **参数安全包络**（ODE era 翻车实验定界）：target_limit ≤0.45（0.55 撞
+   0.6 硬限位）、slew 0.2 rad/s（0.06 静坡粘滑雪崩、0.3 配大限幅撞限位）、
+   sky_roll_damp ≤0.15。dartsim 下三者复测均未翻车（见上文），数值同级或
+   略优，但默认值暂不放宽，详见上文复测结论。
 
 ## 6. 架构演进记录（实验驱动）
 
@@ -97,40 +129,36 @@
 速率阻尼**。落地保持期（零力矩 5s + 增益渐入 2s）使落地动力学与被动一致，
 消除了落地自旋（yaw 漂移 60°→0.2°）。
 
-## 7. Isaac Lab 移植映射（规划中，RTX 4060 Ti 16G 到货后启动）
+## 7. Isaac Lab 移植映射（M4-M7）
 
 模型按"模块化底盘"定位分三层：`tarantula_chassis.xacro`（底盘模块宏，
 prefix 可复用、payload_mount 载荷位，单一事实来源）→
 `tarantula_core.urdf.xacro`（演示配置 = 底盘 + LiDAR 载荷）→
-`tarantula.urdf.xacro`（Gazebo Classic 适配层）。Isaac 导入入口：
+`tarantula.urdf.xacro`（Gazebo Ignition 适配层）。Isaac 导入入口：
 `xacro tarantula_core.urdf.xacro lidar:=false > tarantula.urdf`
 （裸底盘，调平任务无需 LiDAR）后喂 URDF importer。
 
-| Gazebo Classic 侧 | Isaac Lab 侧 | 备注 |
+| Gazebo (Ignition) 侧 | Isaac Lab 侧 | 备注 |
 |---|---|---|
 | `<springStiffness>120` + `implicitSpringDamper` | 关节 drive `stiffness=120`，target=0 | 同为隐式 PD，角色一致 |
 | `<dynamics damping=8>` | 关节 drive `damping=8` | |
-| effort 前馈力矩（ros2_control） | `effort_limit` 内直接施加 joint effort | RL 动作空间可直接用平衡点偏移 Δq，复用几何映射 |
-| gazebo_ros_imu_sensor | Isaac IMU sensor API | |
+| ros2_control + suspension_controller 接受前馈力矩 | RL 动作 → 几何映射 → `set_joint_position_target` | v4 RL 路径直接驱动关节，不经 SuspensionController |
+| IMU sensor（topic, gz.msgs.IMU） | Isaac IMU sensor API | |
 | diff_drive_controller | 轮速 velocity drive | |
-| 接触/LiDAR 插件 | ContactSensor / RayCaster | 调平任务非必需 |
+| 接触/LiDAR 插件 | ContactSensor / RayCaster | RL 任务非必需 |
 
-控制代码同样分层（2026-06-12）：`suspension_core.py` = 零 ROS 依赖的
-算法核心，`active_suspension.py` = ROS 适配层。Isaac env 直接
-`import suspension_core`，Gazebo 与 Isaac 跑同一份算法。三个暴露面：
-**参数面** `SuspensionConfig`（全部可调参数，RL 域随机化自由度）、
-**观测面** `SuspensionInputs`（roll/pitch/角速度/关节角/轮地接触）、
-**动作面** roll_ref/pitch_ref/height_cmd（车身位姿指令，复用几何映射，
-天然有界——RL 动作空间首选，比直接出力矩安全）。新增两条算法通道
-（默认关/零，行为与 v3 逐步等价）：M2 高度通道（dz 加 z_cmd 项，
-±0.06 m）与 M1 接触保持状态机（悬空消抖→缓慢下探→重着地撤回，
-下探量受 target_limit 总限幅约束），均待调参验收后启用。
+**两条互不干扰的控制路径**（运行时由 `rl_policy:=true/false` 切换）：
 
-对比实验设计：同一 core 模型、同一 G2/G3 场景（8° 斜坡、崎岖路），
-对比三种实现——v3 前馈+天棚（移植）、kHz 级管线内全状态反馈
-（Isaac 无话题延迟，可验证"延迟是 roll 动态抑制瓶颈"的归因）、RL 策略。
-预期亮点：在 Isaac 里把控制环提到 kHz 后，Gazebo 中受延迟封顶的
-sky_roll_damp 应能显著调高，roll RMS 改善可量化。
+- **经典路径**（`leveling:=true, rl_policy:=false`）：IMU → `suspension_core.SuspensionController`（PI + 天棚阻尼）→ `active_suspension.py` → `/suspension_controller/commands`。参数全在 `SuspensionConfig`，ROS 参数面暴露。
+- **RL 路径**（`rl_policy:=true`）：IMU + 关节 + odom → `rl_suspension_policy.py`（34D obs → PPO actor → 5D action → 几何映射）→ `/suspension_controller/commands`。`active_suspension` 在此模式下**不启动**（`sim.launch.py` 中以 `leveling AND NOT rl_policy` 条件）。
+
+**M7 v4 实现现状**（2026-06-16）：
+
+- SuspensionController 已从 RL env 完全移除（v4 架构变化）。原因：SuspensionController 内 PID 积分器/启动保持/增益渐入破坏 MDP 假设；`tilt_freeze=0.35 rad` 恰好在 bump 倾角范围内触发，阻碍越障。
+- RL env 动作：`u_roll/u_pitch/z_cmd` 直接进向量化几何映射 → `set_joint_position_target`（stiffness=120/damping=8，无软件中间层）。
+- PPO 训练：400 iter，reward 715（model_399.pt）→ Stage E warm-start +300 iter，加入质量/推力/obs噪声 domain randomization（见 docs/04）。
+- Gazebo 部署验证中，前腿浮空/机身左倾行为待进一步观察。
+- M6 延迟归因实验降优先级（RL 主线优先）。
 
 ## 参考
 

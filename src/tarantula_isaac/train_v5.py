@@ -1,0 +1,89 @@
+"""M7 v5 PPO training — direct runner (no Hydra task registry needed).
+
+Usage (from repo root, with isaac_venv active):
+  python3 src/tarantula_isaac/train_v5.py [--num_envs 64] [--max_iterations 400]
+                                           [--resume logs/rsl_rl/.../model_NNN.pt]
+                                           [--headless]
+"""
+
+import argparse
+import sys
+
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="M7 v5 PPO training")
+parser.add_argument("--num_envs", type=int, default=64)
+parser.add_argument("--max_iterations", type=int, default=400)
+parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to warm-start from")
+AppLauncher.add_app_launcher_args(parser)
+args, _ = parser.parse_known_args()
+args.headless = True  # always headless for training
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+# ---- post-AppLauncher imports (pxr / isaaclab internals now available) ----
+import os
+import time
+from datetime import datetime
+
+import torch
+from rsl_rl.runners import OnPolicyRunner
+
+import importlib.metadata as _meta
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
+from isaaclab.utils.io import dump_yaml
+
+_RSL_RL_VERSION = _meta.version("rsl-rl-lib")
+
+# Our env + cfg — imports fine after AppLauncher
+from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
+from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
+from tarantula_isaac.agents.rsl_rl_ppo_cfg import TarantulaSuspensionPPORunnerCfg
+from tarantula_isaac.robot import ensure_tarantula_usd
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = False
+
+
+def main():
+    ensure_tarantula_usd()
+
+    env_cfg = TarantulaSuspensionEnvCfg()
+    env_cfg.scene.num_envs = args.num_envs
+
+    agent_cfg = TarantulaSuspensionPPORunnerCfg()
+    agent_cfg.max_iterations = args.max_iterations
+    agent_cfg.device = "cuda:0"
+    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _RSL_RL_VERSION)
+
+    log_root = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_v5_stage_a"
+    log_dir = os.path.join(log_root, log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+    print(f"[INFO] Logging to: {log_dir}")
+
+    env = TarantulaSuspensionEnv(cfg=env_cfg, render_mode=None)
+    env = RslRlVecEnvWrapper(env, clip_actions=None)
+
+    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+
+    if args.resume:
+        print(f"[INFO] Resuming from: {args.resume}")
+        runner.load(args.resume)
+
+    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+
+    start = time.time()
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+    print(f"[INFO] Training finished in {round(time.time()-start,1)}s")
+    print(f"[INFO] Checkpoints saved in: {log_dir}")
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+    simulation_app.close()

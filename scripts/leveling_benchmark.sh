@@ -52,7 +52,7 @@ run_phase() {  # $1=leveling true/false  $2=时长  $3=标题
   log_tilt $2
   kill $LP 2>/dev/null
   sleep 4
-  pkill -f gzserver 2>/dev/null; pkill -f active_suspension 2>/dev/null
+  pkill -f "ign gazebo" 2>/dev/null; pkill -f active_suspension 2>/dev/null
   sleep 3
 }
 

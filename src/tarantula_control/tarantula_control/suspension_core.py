@@ -4,21 +4,20 @@
   - 本文件只依赖标准库；适配层（ROS 节点 / Isaac env）负责喂数和发令。
   - Isaac Lab 集成：env 里直接 `SuspensionController(SuspensionConfig())`，
     每个物理步构造 SuspensionInputs 调 step()，把 torques 写进 joint effort。
-    控制环频率由调用方决定（Gazebo 100Hz / Isaac 可到 kHz——kHz 下
-    sky_*_damp 的延迟封顶应可放开，即 docs §7 的归因实验）。
+    控制环频率由调用方决定（Gazebo 100Hz / Isaac 可到 kHz）。
 
 三个暴露面（Isaac / RL 对接口）：
   参数面  SuspensionConfig   —— 全部可调参数（RL 域随机化/调参的自由度）
-  观测面  SuspensionInputs   —— 姿态/角速度/关节角/轮地接触（RL observation 候选）
+  观测面  SuspensionInputs   —— 姿态/关节角/轮地接触（RL observation 候选）
   动作面  inputs 中的 roll_ref/pitch_ref/height_cmd（RL action 候选：
           车身位姿指令，复用几何映射，天然有界——比直接出力矩安全）
 
 算法（v3 + M1/M2 扩展，行为不变原则：默认参数下与 v3 逐步等价）：
-  外环：roll/pitch 各一 PI（条件积分抗饱和、死区、输出限幅=行程界限）
+  外环：roll/pitch 各一 PID（D 项作用于姿态角速率，抑制 bump 激起的被动悬挂
+        共振放大；kd=0 时退化为 v3 纯 PI；条件积分抗饱和、死区、输出限幅=行程界限）
   映射：dz_i = x_i·u_pitch − y_i·u_roll + z_cmd（M2 高度通道）
         q_target_i = q0 + DIR_i·dz_i/(L·cosθ₀)，限幅+斜率限制
   前馈：tau = k_spring·dq 平移物理弹簧平衡点（DC=1.0，无软件快环）
-  天棚：陀螺角速度通道（相位超前，耐延迟）
   M1 接触保持（默认关）：每腿 支撑/悬空/重着地 状态机，悬空超过消抖时间
         后以 probe_slew 缓慢下探找地，重着地后同速率撤回；
         下探量并入平衡点偏移，受 target_limit 总限幅约束
@@ -49,6 +48,19 @@ def quat_roll_pitch(w, x, y, z):
     return roll, math.asin(sinp)
 
 
+def projected_gravity(w, x, y, z):
+    """四元数 -> 重力向量 [0,0,-1] 在车体系下的投影 (gx,gy,gz)。
+
+    与 IsaacLab ``ArticulationData.projected_gravity_b``
+    （``quat_rotate_inverse(quat_w, [0,0,-1])``）逐式等价，供 M7 v2
+    Gazebo 部署构造与训练一致的观测（见 rl_suspension_policy.py）。
+    """
+    gx = 2.0 * w * y - 2.0 * x * z
+    gy = -2.0 * w * x - 2.0 * y * z
+    gz = 1.0 - 2.0 * w * w - 2.0 * z * z
+    return gx, gy, gz
+
+
 @dataclass
 class SuspensionConfig:
     """参数面。默认值即 v3 定稿值（参数安全包络见 docs/01 §5 已知限制③）。"""
@@ -56,19 +68,20 @@ class SuspensionConfig:
     arm_length: float = 0.22
     arm_angle: float = 0.698
     nominal_angle: float = 0.0
-    # 姿态外环 PI（俯仰杠杆比 3.0，增益须折减）
+    # 姿态外环 PID（俯仰杠杆比 3.0，增益须折减；kd 抑制 bump 激起的被动悬挂共振放大，
+    # grid search 选定 0.3/0.1（M1 验收 total contact-loss 局部最优）；
+    # kd=0 时退化为 v3 纯 PI）
     roll_kp: float = 0.8
     roll_ki: float = 1.2
+    roll_kd: float = 0.3
     pitch_kp: float = 0.3
     pitch_ki: float = 0.5
+    pitch_kd: float = 0.1
     att_deadband: float = 0.009     # rad ≈ 0.5°
     att_out_limit: float = 0.22     # rad，行程内
-    # 前馈刚度：必须等于 URDF springStiffness
+    # 前馈刚度：必须与 URDF springStiffness 手动保持同步（tarantula_chassis.xacro susp_spring_k）
+    # RL 路径同样使用此值（rl_suspension_policy.py）；修改 URDF 后需同步更新此处
     ff_stiffness: float = 120.0
-    # 天棚阻尼（>0.15 在 ~20ms 话题延迟下负阻尼翻车；kHz 环可放开）
-    sky_roll_damp: float = 0.15
-    sky_pitch_damp: float = 0.12
-    sky_limit: float = 0.20
     # 平衡点安全包络（0.55/0.3 等组合实测翻车，勿动）
     target_slew_rate: float = 0.20  # rad/s
     target_limit: float = 0.45      # rad，关节硬限位 0.6
@@ -79,8 +92,11 @@ class SuspensionConfig:
     # M2 车身高度通道（goals v2：±0.06 m）
     height_limit: float = 0.06      # m
     # M1 接触保持（默认关：未调参，开启前先跑 M1 验收）
-    contact_keeping: bool = False
+    contact_keeping: bool = True
     contact_debounce: float = 0.10  # s，悬空消抖
+    contact_force_threshold: float = 5.0  # N，/ft_wheel/{leg} 力幅值接触判定阈值
+    # （轮轴 |F|，恒为正；与几何接触地面真值对比误判率<1%，
+    #   髋关节 force.z 因悬挂振荡误判率约33%，已弃用）
     probe_slew: float = 0.10        # m/s，轮心下探/撤回速度
     probe_limit: float = 0.05       # m，单腿最大下探量
 
@@ -90,8 +106,6 @@ class SuspensionInputs:
     """观测面 + 动作面。适配层每控制步构造一份。"""
     roll: float = 0.0
     pitch: float = 0.0
-    roll_rate: float = 0.0
-    pitch_rate: float = 0.0
     joint_pos: dict = field(default_factory=dict)   # leg -> 悬挂关节角
     contacts: dict = field(default_factory=dict)    # leg -> bool，缺省视为着地
     # 动作面：车身位姿指令（默认零 = 纯调平，与 v3 等价）
@@ -111,20 +125,25 @@ class SuspensionOutputs:
     height: float = 0.0                              # 实际生效的 z 指令
     frozen: bool = False
     holding: bool = False
+    # Isaac Lab 集成用：等效关节位置目标 = q0 + gain·dq_total
+    # （position-drive PD 代入后与 torques 的弹簧前馈代数恒等，
+    #  见 docs/01 §7；leg -> rad）
+    drive_target: dict = field(default_factory=dict)
 
 
-class Pi:
-    """姿态外环 PI，带输出限幅与条件积分（输出饱和时停止积分，防 windup）。"""
+class Pid:
+    """姿态外环 PID，带输出限幅与条件积分（输出饱和时停止积分，防 windup）。
+    D 项作用于姿态角速率而非误差，避免死区边界误差跳变引起微分突变。"""
 
-    def __init__(self, kp, ki, out_limit):
-        self.kp, self.ki, self.out_limit = kp, ki, out_limit
+    def __init__(self, kp, ki, kd, out_limit):
+        self.kp, self.ki, self.kd, self.out_limit = kp, ki, kd, out_limit
         self.integral = 0.0
 
-    def update(self, err, dt):
-        out = self.kp * err + self.ki * self.integral
+    def update(self, err, rate, dt):
+        out = self.kp * err + self.ki * self.integral + self.kd * rate
         if abs(out) < self.out_limit or err * out < 0:
             self.integral += err * dt
-        out = self.kp * err + self.ki * self.integral
+        out = self.kp * err + self.ki * self.integral + self.kd * rate
         return clamp(out, -self.out_limit, self.out_limit)
 
     def reset(self):
@@ -138,8 +157,8 @@ class SuspensionController:
         self.cfg = cfg
         self.L_eff = cfg.arm_length * math.cos(cfg.arm_angle)
         self.q0 = cfg.nominal_angle
-        self.roll_pi = Pi(cfg.roll_kp, cfg.roll_ki, cfg.att_out_limit)
-        self.pitch_pi = Pi(cfg.pitch_kp, cfg.pitch_ki, cfg.att_out_limit)
+        self.roll_pi = Pid(cfg.roll_kp, cfg.roll_ki, cfg.roll_kd, cfg.att_out_limit)
+        self.pitch_pi = Pid(cfg.pitch_kp, cfg.pitch_ki, cfg.pitch_kd, cfg.att_out_limit)
         self.reset()
 
     def reset(self):
@@ -149,6 +168,8 @@ class SuspensionController:
         self.q_target = {leg: self.q0 for leg in LEGS}
         self.probe = {leg: 0.0 for leg in LEGS}      # 轮心下探量 m（dz 意义）
         self.lost_t = {leg: 0.0 for leg in LEGS}     # 悬空持续时间 s
+        self.prev_roll = 0.0
+        self.prev_pitch = 0.0
 
     def step(self, x: SuspensionInputs, dt: float) -> SuspensionOutputs:
         cfg = self.cfg
@@ -158,12 +179,18 @@ class SuspensionController:
         # 落地保持期：零力矩，落地动力学与纯被动一致（消除落地自旋）
         if self.t < cfg.startup_hold:
             self.reset_targets_only()
+            self.prev_roll, self.prev_pitch = x.roll, x.pitch
             out.torques = [0.0] * len(LEGS)
             out.holding = True
             out.q_target = dict(self.q_target)
             out.probe_dz = dict(self.probe)
+            out.drive_target = {leg: self.q0 for leg in LEGS}
             return out
         gain = 1.0 if cfg.gain_ramp <= 0 else min(1.0, (self.t - cfg.startup_hold) / cfg.gain_ramp)
+
+        roll_rate = (x.roll - self.prev_roll) / dt
+        pitch_rate = (x.pitch - self.prev_pitch) / dt
+        self.prev_roll, self.prev_pitch = x.roll, x.pitch
 
         # 包络保护：姿态异常时外环清零，只回名义位，绝不挣扎
         frozen = math.sqrt(x.roll ** 2 + x.pitch ** 2) > cfg.tilt_freeze
@@ -174,12 +201,8 @@ class SuspensionController:
         else:
             def db(err):
                 return 0.0 if abs(err) < cfg.att_deadband else err
-            u_roll = self.roll_pi.update(db(x.roll - x.roll_ref), dt)
-            u_pitch = self.pitch_pi.update(db(x.pitch - x.pitch_ref), dt)
-
-        # 天棚阻尼：角速度快通道，不经过慢速调平路径
-        u_roll_d = cfg.sky_roll_damp * x.roll_rate
-        u_pitch_d = cfg.sky_pitch_damp * x.pitch_rate
+            u_roll = self.roll_pi.update(db(x.roll - x.roll_ref), roll_rate, dt)
+            u_pitch = self.pitch_pi.update(db(x.pitch - x.pitch_ref), pitch_rate, dt)
 
         # M2 高度通道：限幅后并入几何映射（斜率由各腿 slew 统一约束）
         z = 0.0 if frozen else clamp(x.height_cmd, -cfg.height_limit, cfg.height_limit)
@@ -211,12 +234,9 @@ class SuspensionController:
                              + DIR[leg] * self.probe[leg] / self.L_eff,
                              -cfg.target_limit, cfg.target_limit)
 
-            # 天棚阻尼等效偏移（限幅，无斜率限制——要的就是快）
-            dz_d = WHEEL_X[leg] * u_pitch_d - WHEEL_Y[leg] * u_roll_d
-            dq_d = clamp(DIR[leg] * dz_d / self.L_eff, -cfg.sky_limit, cfg.sky_limit)
-
             # 前馈：平移物理弹簧平衡点（增益渐入）
-            out.torques.append(gain * cfg.ff_stiffness * (dq_total + dq_d))
+            out.torques.append(gain * cfg.ff_stiffness * dq_total)
+            out.drive_target[leg] = self.q0 + gain * dq_total
 
         out.u_roll, out.u_pitch = u_roll, u_pitch
         out.q_target = dict(self.q_target)

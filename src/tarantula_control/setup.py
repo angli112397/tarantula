@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'active_suspension = tarantula_control.active_suspension:main',
+            'rl_suspension_policy = tarantula_control.rl_suspension_policy:main',
             'scan_gate = tarantula_control.scan_gate:main',
         ],
     },

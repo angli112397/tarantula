@@ -24,9 +24,15 @@ from rclpy.node import Node
 
 
 def truth_pose():
-    out = subprocess.check_output(['gz', 'model', '-m', 'tarantula', '-p'],
-                                  text=True).strip().split('\n')[-1].split()
-    return float(out[0]), float(out[1]), float(out[5])
+    # `ign model -p` 输出多行：倒数第二行是 XYZ，最后一行是 RPY
+    #   - Pose [ XYZ (m) ] [ RPY (rad) ]:
+    #     [x y z]
+    #     [roll pitch yaw]
+    lines = subprocess.check_output(['ign', 'model', '-m', 'tarantula', '-p'],
+                                     text=True).strip().split('\n')
+    xyz = lines[-2].strip().strip('[]').split()
+    rpy = lines[-1].strip().strip('[]').split()
+    return float(xyz[0]), float(xyz[1]), float(rpy[2])
 
 
 def main():
