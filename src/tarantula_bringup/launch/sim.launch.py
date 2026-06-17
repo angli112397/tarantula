@@ -63,14 +63,33 @@ def generate_launch_description():
                    '-z', LaunchConfiguration('spawn_z')],
         output='screen')
 
-    # gz -> ROS 单向桥接：/clock (use_sim_time)、IMU、雷达、6 路腿部力/力矩传感器
-    bridge = Node(
+    # Keep the default GUI launch light. SLAM and full RL observation bridges are
+    # opt-in because Gazebo GUI plus many high-rate sensor bridges can drop RTF.
+    core_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
             '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
+        ],
+        remappings=[
+            ('/imu', '/imu/data'),
+        ],
+        output='screen')
+
+    lidar_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
             '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
+        ],
+        condition=IfCondition(LaunchConfiguration('bridge_lidar')),
+        output='screen')
+
+    force_torque_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
             '/ft/fl@geometry_msgs/msg/Wrench[gz.msgs.Wrench',
             '/ft/fr@geometry_msgs/msg/Wrench[gz.msgs.Wrench',
             '/ft/ml@geometry_msgs/msg/Wrench[gz.msgs.Wrench',
@@ -84,9 +103,7 @@ def generate_launch_description():
             '/ft_wheel/rl@geometry_msgs/msg/Wrench[gz.msgs.Wrench',
             '/ft_wheel/rr@geometry_msgs/msg/Wrench[gz.msgs.Wrench',
         ],
-        remappings=[
-            ('/imu', '/imu/data'),
-        ],
+        condition=IfCondition(LaunchConfiguration('bridge_force_torque')),
         output='screen')
 
     # gz-sim 的 LaserScan.header.frame_id 是 sensor 的 scoped 名（tarantula/base_link/
@@ -97,6 +114,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         arguments=['0', '0', '0', '0', '0', '0', 'lidar_link', 'tarantula/base_link/lidar_sensor'],
+        condition=IfCondition(LaunchConfiguration('bridge_lidar')),
         output='screen')
 
     joint_state_broadcaster = Node(
@@ -134,8 +152,8 @@ def generate_launch_description():
         output='screen')
 
     # Motion deployment node: classical skid-steer wheel targets with optional
-    # bounded RL structured compensation. Stage A does not command hip posture;
-    # v2 posture is owned by the trajectory controller or an explicit test/profile node.
+    # bounded RL structured compensation. A 53D/9D Stage B actor also publishes
+    # six hip targets through the v2 trajectory controller.
     # cmd_vx/cmd_wz are cmd_vel-style fallback defaults; /cmd_vel overrides them.
     motion_control_node = Node(
         package='tarantula_control',
@@ -159,6 +177,7 @@ def generate_launch_description():
             'turn_exit_wz': ParameterValue(LaunchConfiguration('turn_exit_wz'), value_type=float),
             'policy_weights_npz': LaunchConfiguration('policy_weights_npz'),
             'rl_compensation_enabled': ParameterValue(LaunchConfiguration('rl_compensation_enabled'), value_type=bool),
+            'force_observation_enabled': ParameterValue(LaunchConfiguration('force_observation_enabled'), value_type=bool),
         }],
         condition=IfCondition(AndSubstitution(
             LaunchConfiguration('motion_control'),
@@ -175,8 +194,8 @@ def generate_launch_description():
                               description='true 时启动 /cmd_vel -> per-wheel 传统主控，可选叠加 RL structured compensation'),
         DeclareLaunchArgument('start_motion_control', default_value='true',
                               description='motion_control:=true 时是否启动 motion_control_node；false 可只启动独立轮速/悬挂控制器用于开环物理测试'),
-        DeclareLaunchArgument('wheel_collision', default_value='cylinder',
-                              description='轮胎 collision 几何：sphere 或 cylinder；用于 Gazebo/Isaac 物理 A/B'),
+        DeclareLaunchArgument('wheel_collision', default_value='sphere',
+                              description='轮胎 collision 几何：默认 sphere；cylinder 仅用于接触物理 A/B'),
         DeclareLaunchArgument('robot_model', default_value='tarantula_v2.urdf.xacro',
                               description='robot xacro model under tarantula_description/urdf; current baseline is tarantula_v2.urdf.xacro'),
         DeclareLaunchArgument('cmd_vx', default_value='0.1',
@@ -213,6 +232,12 @@ def generate_launch_description():
                               description='RL actor .npz 权重路径；rl_compensation_enabled:=true 时必须显式提供'),
         DeclareLaunchArgument('rl_compensation_enabled', default_value='false',
                               description='true 时在传统 skid-steer wheel target 上叠加 RL structured compensation；false 时只跑传统运动控制'),
+        DeclareLaunchArgument('force_observation_enabled', default_value='false',
+                              description='true 时 motion_control_node 订阅 /ft_wheel/*；Stage B RL 完整观测或诊断时开启'),
+        DeclareLaunchArgument('bridge_force_torque', default_value='false',
+                              description='true 时桥接 12 路 Gazebo force/torque topic；GUI 基础运动演示默认关闭以提高 RTF'),
+        DeclareLaunchArgument('bridge_lidar', default_value='false',
+                              description='true 时桥接 /scan 并发布 lidar frame 静态 TF；SLAM/Nav 演示时开启'),
         DeclareLaunchArgument('truth_odom', default_value='false',
                               description='仅启动 Gazebo truth odometry 诊断/benchmark 节点；不进入 motion_control 算法'),
         DeclareLaunchArgument('truth_odom_topic', default_value='/tarantula/truth_odom',
@@ -223,7 +248,9 @@ def generate_launch_description():
                               description='Gazebo world SDF；默认使用 generated/terrains/gazebo_demo/42/world.sdf'),
         gz_sim_gui,
         gz_sim_headless,
-        bridge,
+        core_bridge,
+        lidar_bridge,
+        force_torque_bridge,
         robot_state_publisher,
         lidar_frame_bridge,
         spawn_robot,

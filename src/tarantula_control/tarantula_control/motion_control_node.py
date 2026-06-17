@@ -1,6 +1,6 @@
 """Classical motion-control node with optional RL wheel compensation.
 
-Stage A motion-control baseline:
+Stage B motion-control baseline:
   - 传统 skid-steer controller 将 /cmd_vel 映射为 6 个驱动轮速度目标
   - RL 可选输出 action[0:3] 作为 structured skid-steer compensation:
     track_scale_delta, left_drive_scale_delta, right_drive_scale_delta
@@ -16,7 +16,7 @@ Stage A motion-control baseline:
   wheel_force(18)          <- /ft_wheel/{leg}，Fx/Fy/Fz / nominal_wheel_load
   cmd_vx(1)                <- /cmd_vel.linear.x, fallback ROS 参数
   cmd_wz(1)                <- /cmd_vel.angular.z, fallback ROS 参数
-  prev_action(3)           <- 上一步 structured compensation 策略输出
+  prev_action(9)           <- 上一步 structured compensation + hip 策略输出
 
 控制常量：
   compensation action scale 和 wheel clamp 优先从 actor .npz metadata 读取；
@@ -29,6 +29,8 @@ from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Twist, Wrench
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float64MultiArray
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from builtin_interfaces.msg import Duration
 import time
 
 from .control_interfaces import (
@@ -40,10 +42,11 @@ from .motion_control import (
     SkidSteerMotionController,
     STAGE_A_ACTION_DIM,
     STAGE_A_OBSERVATION_DIM,
+    STAGE_B_ACTION_DIM,
     build_stage_a_observation,
 )
 from .rl_policy import RLWheelCompensationPolicy
-from .suspension_core import LEGS, projected_gravity
+from .suspension_core import HIP_JOINTS, HIP_TARGET_LIMIT, LEGS, projected_gravity
 
 
 class MotionControlNode(Node):
@@ -67,9 +70,11 @@ class MotionControlNode(Node):
         self.declare_parameter('turn_exit_wz', 0.04)
         self.declare_parameter('policy_weights_npz', '')
         self.declare_parameter('rl_compensation_enabled', True)
+        self.declare_parameter('force_observation_enabled', False)
 
         weights_npz = self.get_parameter('policy_weights_npz').value
         self.rl_compensation_enabled = bool(self.get_parameter('rl_compensation_enabled').value)
+        self.force_observation_enabled = bool(self.get_parameter('force_observation_enabled').value)
         self.policy = RLWheelCompensationPolicy(weights_npz_path=weights_npz) if self.rl_compensation_enabled else None
         max_abs_wheel_omega = (
             self.policy.max_abs_wheel_omega if self.policy is not None else MAX_ABS_WHEEL_OMEGA
@@ -114,24 +119,28 @@ class MotionControlNode(Node):
         self.joint_vel = {leg: 0.0 for leg in LEGS}
         self.wheel_vel = {leg: 0.0 for leg in LEGS}
         self.wheel_force = {leg: (0.0, 0.0, 0.0) for leg in LEGS}  # Fx/Fy/Fz in N
-        self.prev_action = np.zeros(STAGE_A_ACTION_DIM, dtype=np.float32)
+        action_dim = self.policy.action_dim if self.policy is not None else STAGE_A_ACTION_DIM
+        self.prev_action = np.zeros(action_dim, dtype=np.float32)
         self.joint_seen = False
         self.last_step_time = time.monotonic()
 
         self.wheel_pub = self.create_publisher(
             Float64MultiArray, '/wheel_velocity_controller/commands', 10)
+        self.hip_pub = self.create_publisher(
+            JointTrajectory, '/suspension_controller/joint_trajectory', 10)
         self.status_pub = self.create_publisher(
             Float64MultiArray, '/rl_policy/status', 10)
 
         self.create_subscription(Imu, '/imu/data', self.imu_cb, 50)
         self.create_subscription(JointState, '/joint_states', self.joint_cb, 50)
         self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_cb, 10)
-        for leg in LEGS:
-            self.create_subscription(
-                Wrench, f'/ft_wheel/{leg}',
-                lambda msg, l=leg: self.ft_wheel_cb(msg, l),
-                50,
-            )
+        if self.force_observation_enabled:
+            for leg in LEGS:
+                self.create_subscription(
+                    Wrench, f'/ft_wheel/{leg}',
+                    lambda msg, l=leg: self.ft_wheel_cb(msg, l),
+                    50,
+                )
 
         rate = self.get_parameter('rate').value
         self.create_timer(1.0 / rate, self.step)
@@ -140,6 +149,7 @@ class MotionControlNode(Node):
         action_dim = self.policy.action_dim if self.policy is not None else 0
         self.get_logger().info(
             f'motion controller started (rl_compensation_enabled={self.rl_compensation_enabled}, '
+            f'force_observation_enabled={self.force_observation_enabled}, '
             f'action_dim={action_dim}, obs_dim={obs_dim}, '
             f'velocity_source=none_in_actor, '
             f'max_abs_wheel_omega={self.motion_controller.config.max_abs_wheel_omega}, '
@@ -211,6 +221,19 @@ class MotionControlNode(Node):
         command = self.motion_controller.limit_command(msg.linear.x, msg.angular.z)
         self.cmd_vx, self.cmd_wz = command.vx, command.wz
 
+    def publish_hip_targets(self, action: np.ndarray) -> None:
+        if action.shape[0] < STAGE_B_ACTION_DIM:
+            return
+        limit = self.policy.hip_action_target_limit if self.policy is not None else HIP_TARGET_LIMIT
+        targets = np.clip(action[3:9], -1.0, 1.0) * min(abs(float(limit)), HIP_TARGET_LIMIT)
+        point = JointTrajectoryPoint()
+        point.positions = [float(value) for value in targets]
+        point.time_from_start = Duration(sec=0, nanosec=100_000_000)
+        msg = JointTrajectory()
+        msg.joint_names = list(HIP_JOINTS)
+        msg.points = [point]
+        self.hip_pub.publish(msg)
+
     def step(self):
         if not self.joint_seen:
             return
@@ -245,6 +268,7 @@ class MotionControlNode(Node):
             dt=dt,
         )
         self.wheel_pub.publish(Float64MultiArray(data=wheel_cmds))
+        self.publish_hip_targets(action)
         action_saturation = float(np.max(np.abs(action))) if action.size else 0.0
         self.status_pub.publish(Float64MultiArray(data=[
             1.0 if self.policy is not None else 0.0,

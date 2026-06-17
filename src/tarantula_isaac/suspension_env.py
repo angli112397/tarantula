@@ -1,16 +1,15 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""DirectRLEnv for the Tarantula structured-compensation Stage A task.
+"""DirectRLEnv for the Tarantula Stage B wheel + hip residual task.
 
-The policy's 3D action is a bounded correction around analytic skid-steer
-targets:
+The policy's first three actions are bounded corrections around analytic
+skid-steer targets:
   action[0] adjusts effective track scale
   action[1] adjusts left drive scale
   action[2] adjusts right drive scale
 
-Suspension is held at a neutral target by the env. Gazebo deployment keeps hip
-posture on the v2 trajectory controller and uses this structured compensation
-actor for Stage A.
+Stage B adds six direct bounded hip position targets in LEGS order. The network
+architecture remains the same size as the Stage A ablation.
 
 Wheel force signal (18D continuous, force vector normalized by nominal wheel
 load) is added to the observation, matching the deployable /ft_wheel/{leg} F/T
@@ -21,7 +20,8 @@ The raw command interface is cmd_vel-style: cmd_vx (m/s) and cmd_wz (rad/s).
 The policy observes and is rewarded against the shaped execution command,
 matching Gazebo's default stop-turn-drive baseline.
 
-Action space = 3D. Obs = 47D. See suspension_env_cfg.py for full layout.
+Action space = 9D by default. Obs = 53D by default. See suspension_env_cfg.py
+for full layout; the 47D/3D Stage A ablation is still available for comparison.
 """
 
 from __future__ import annotations
@@ -47,6 +47,8 @@ from .suspension_env_cfg import TarantulaSuspensionEnvCfg
 REWARD_KEYS = (
     "tracking_lin_vel",
     "tracking_yaw_rate",
+    "delta_lin_vel",
+    "delta_yaw_rate",
     "yaw_sign",
     "orientation",
     "lin_vel_z",
@@ -57,6 +59,9 @@ REWARD_KEYS = (
     "action_rate",
     "action_magnitude",
     "action_saturation",
+    "hip_action_rate",
+    "hip_action_magnitude",
+    "wheel_target_saturation",
     "joint_limit",
     "alive",
     "termination",
@@ -117,9 +122,9 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             [f"wheel_{leg}_joint" for leg in LEGS], preserve_order=True
         )
 
-        # Stage A: 3D structured compensation. Suspension is held at neutral target.
-        self._actions = torch.zeros(self.num_envs, 3, device=self.device)
-        self._previous_actions = torch.zeros(self.num_envs, 3, device=self.device)
+        # Stage B default: 3D wheel residual plus optional 6D hip target action.
+        self._actions = torch.zeros(self.num_envs, int(self.cfg.action_space), device=self.device)
+        self._previous_actions = torch.zeros(self.num_envs, int(self.cfg.action_space), device=self.device)
         self._cmd_vx = torch.zeros(self.num_envs, device=self.device)
         self._cmd_wz = torch.zeros(self.num_envs, device=self.device)
         self._exec_cmd_vx = torch.zeros(self.num_envs, device=self.device)
@@ -135,6 +140,11 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             for key in METRIC_KEYS
         }
         self._last_wheel_target = torch.zeros(self.num_envs, 6, device=self.device)
+        self._last_hip_target = torch.full(
+            (self.num_envs, 6),
+            float(self.cfg.stand_susp_target),
+            device=self.device,
+        )
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -178,11 +188,18 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             self._push_countdown[push_envs] = torch.randint(slo, shi, (n,), device=self.device)
 
     def _apply_action(self) -> None:
-        susp = torch.full(
-            (self.num_envs, 6),
-            float(self.cfg.stand_susp_target),
-            device=self.device,
-        )
+        if self.cfg.hip_action_enabled:
+            hip_raw = self._actions[:, 3:9]
+            if hip_raw.shape[1] != 6:
+                raise RuntimeError("hip_action_enabled requires a 9D action space")
+            susp = hip_raw * float(self.cfg.hip_action_target_limit)
+        else:
+            susp = torch.full(
+                (self.num_envs, 6),
+                float(self.cfg.stand_susp_target),
+                device=self.device,
+            )
+        self._last_hip_target = susp.detach()
         self._robot.set_joint_position_target(susp.clamp(-0.6, 0.6), joint_ids=self._susp_joint_ids)
 
         drive_active = torch.abs(self._exec_cmd_vx) >= 1.0e-4
@@ -250,10 +267,10 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 wheel_force_b,                          # 18
                 self._exec_cmd_vx.unsqueeze(-1),        # 1
                 self._exec_cmd_wz.unsqueeze(-1),        # 1
-                self._previous_actions,                 # 3
+                self._previous_actions,                 # 3 or 9
             ),
             dim=-1,
-        )  # total: 47
+        )
         self._previous_actions = self._actions.clone()
         if self.cfg.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * self.cfg.obs_noise_std
@@ -330,11 +347,24 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=-1)
         action_magnitude = torch.sum(torch.square(self._actions), dim=-1)
+        if self.cfg.hip_action_enabled:
+            hip_action_rate = torch.sum(torch.square(self._actions[:, 3:9] - self._previous_actions[:, 3:9]), dim=-1)
+            hip_action_magnitude = torch.sum(torch.square(self._actions[:, 3:9]), dim=-1)
+        else:
+            hip_action_rate = torch.zeros(self.num_envs, device=self.device)
+            hip_action_magnitude = torch.zeros(self.num_envs, device=self.device)
         action_saturation_margin = torch.clamp(
             torch.abs(self._actions) - self.cfg.action_saturation_soft_limit,
             min=0.0,
         )
         action_saturation = torch.sum(torch.square(action_saturation_margin), dim=-1)
+        wheel_limit = max(float(self.cfg.max_abs_wheel_omega), 1.0e-6)
+        wheel_target_abs = torch.abs(self._last_wheel_target) / wheel_limit
+        wheel_saturation_margin = torch.clamp(
+            wheel_target_abs - self.cfg.wheel_target_saturation_soft_limit,
+            min=0.0,
+        )
+        wheel_target_saturation = torch.sum(torch.square(wheel_saturation_margin), dim=-1)
 
         ang_vel_b = self._robot.data.root_ang_vel_b
         lin_vel_b = self._robot.data.root_lin_vel_b
@@ -349,9 +379,39 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         tracking_yaw_rate = torch.exp(
             -torch.square(yaw_rate_err) / (self.cfg.reward_tracking_yaw_rate_sigma**2)
         )
+        vx_error_sq = torch.square(v_x - target_v_x)
+        wz_error_sq = torch.square(yaw_rate_err)
         yaw_active = torch.abs(self._exec_cmd_wz) >= self.cfg.command_min_abs_wz
         drive_active = torch.abs(self._exec_cmd_vx) >= self.cfg.command_min_abs_vx
         pure_turn_active = yaw_active & ~drive_active
+        baseline_vx_error = (
+            float(self.cfg.baseline_vx_error_floor)
+            + float(self.cfg.baseline_vx_error_fraction) * torch.abs(target_v_x)
+        )
+        baseline_wz_error = (
+            float(self.cfg.baseline_wz_error_floor)
+            + float(self.cfg.baseline_wz_error_fraction) * torch.abs(self._exec_cmd_wz)
+        )
+        delta_lin_vel = torch.where(
+            drive_active,
+            torch.clamp(
+                (torch.square(baseline_vx_error) - vx_error_sq)
+                / torch.clamp(torch.square(baseline_vx_error), min=1.0e-6),
+                -1.0,
+                1.0,
+            ),
+            torch.zeros_like(v_x),
+        )
+        delta_yaw_rate = torch.where(
+            yaw_active,
+            torch.clamp(
+                (torch.square(baseline_wz_error) - wz_error_sq)
+                / torch.clamp(torch.square(baseline_wz_error), min=1.0e-6),
+                -1.0,
+                1.0,
+            ),
+            torch.zeros_like(v_x),
+        )
         yaw_dir = torch.sign(self._exec_cmd_wz)
         yaw_progress = torch.clamp(ang_vel_b[:, 2] * yaw_dir / torch.clamp(torch.abs(self._exec_cmd_wz), min=1.0e-3), 0.0, 1.0)
         yaw_sign_reward = torch.where(yaw_active, yaw_progress, torch.ones_like(yaw_progress))
@@ -383,6 +443,8 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         return {
             "tracking_lin_vel": self.cfg.reward_tracking_lin_vel_weight * tracking_lin_vel,
             "tracking_yaw_rate": self.cfg.reward_tracking_yaw_rate_weight * tracking_yaw_rate,
+            "delta_lin_vel": self.cfg.reward_delta_lin_vel_weight * delta_lin_vel,
+            "delta_yaw_rate": self.cfg.reward_delta_yaw_rate_weight * delta_yaw_rate,
             "yaw_sign": self.cfg.reward_yaw_sign_weight * yaw_sign_reward,
             "orientation": self.cfg.reward_orientation_weight * orientation_reward,
             "ang_vel_xy": -self.cfg.reward_ang_vel_xy_weight * torch.sum(torch.square(ang_vel_b[:, :2]), dim=-1),
@@ -393,6 +455,9 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             "action_rate": -self.cfg.reward_action_rate_weight * action_rate,
             "action_magnitude": -self.cfg.reward_action_magnitude_weight * action_magnitude,
             "action_saturation": -self.cfg.reward_action_saturation_weight * action_saturation,
+            "hip_action_rate": -self.cfg.reward_hip_action_rate_weight * hip_action_rate,
+            "hip_action_magnitude": -self.cfg.reward_hip_action_magnitude_weight * hip_action_magnitude,
+            "wheel_target_saturation": -self.cfg.reward_wheel_target_saturation_weight * wheel_target_saturation,
             "joint_limit": -self.cfg.reward_joint_limit_weight * joint_limit_penalty,
             "alive": torch.full((self.num_envs,), self.cfg.reward_alive_bonus, device=self.device),
             "termination": -self.cfg.reward_termination_penalty * terminated.float(),

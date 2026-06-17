@@ -1,4 +1,4 @@
-"""Deterministic Isaac Lab rollout health check for Tarantula Stage A.
+"""Deterministic Isaac Lab rollout health check for Tarantula Stage B.
 
 The script runs the same command sequence used by the Gazebo tracking checks
 inside Isaac Lab before a policy is exported or judged in Gazebo.
@@ -16,7 +16,7 @@ DEFAULT_OUT = REPO_ROOT / "generated" / "benchmarks" / "isaac_eval" / "summary.j
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Evaluate Tarantula Stage A policy in Isaac Lab.")
+parser = argparse.ArgumentParser(description="Evaluate Tarantula Stage B policy in Isaac Lab.")
 parser.add_argument("--terrain-dir", default=str(DEFAULT_TERRAIN_DIR))
 parser.add_argument("--terrain-level-min", type=int, default=None)
 parser.add_argument("--terrain-level-max", type=int, default=None)
@@ -89,7 +89,8 @@ def _open_loop_action(
     wz_scale: float,
 ) -> torch.Tensor:
     del vx, wz
-    action = np.asarray(
+    action = np.zeros(int(cfg.action_space), dtype=np.float32)
+    action[:3] = np.asarray(
         [
             (wz_scale - 1.0) / float(cfg.track_scale_delta_limit),
             (vx_scale - 1.0) / float(cfg.drive_scale_delta_limit),
@@ -184,6 +185,10 @@ def main() -> None:
         if not args.policy_npz:
             raise ValueError("--policy-npz is required with --mode npz")
         policy = RLWheelCompensationPolicy(args.policy_npz)
+        if policy.action_dim == 9:
+            cfg.hip_action_enabled = True
+            cfg.action_space = 9
+            cfg.observation_space = 53
         if policy.action_dim != cfg.action_space:
             raise ValueError(
                 f"policy action dim {policy.action_dim} does not match current Isaac env action space {cfg.action_space}"
@@ -191,6 +196,7 @@ def main() -> None:
         cfg.max_abs_wheel_omega = float(policy.max_abs_wheel_omega)
         cfg.track_scale_delta_limit = float(policy.track_scale_delta_limit)
         cfg.drive_scale_delta_limit = float(policy.drive_scale_delta_limit)
+        cfg.hip_action_target_limit = float(policy.hip_action_target_limit)
 
     env = TarantulaSuspensionEnv(cfg=cfg, render_mode=None)
     obs = _reset(env)

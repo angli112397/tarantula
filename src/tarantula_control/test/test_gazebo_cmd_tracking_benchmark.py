@@ -82,6 +82,38 @@ class GazeboCmdTrackingBenchmarkTest(unittest.TestCase):
         self.assertFalse(comparison["pass"])
         self.assertIn("turn_left:stability_regression", comparison["hard_failures"])
 
+    def test_compare_fails_when_candidate_uses_high_action_saturation(self):
+        baseline = {
+            "segments": [
+                {
+                    "segment": "forward",
+                    "rms_vx_error": 0.20,
+                    "rms_wz_error": 0.10,
+                    "roll_rms_rad": 0.10,
+                    "pitch_rms_rad": 0.10,
+                    "rl_action_saturation_rate": 0.0,
+                }
+            ],
+        }
+        candidate = {
+            "segments": [
+                {
+                    "segment": "forward",
+                    "rms_vx_error": 0.10,
+                    "rms_wz_error": 0.05,
+                    "roll_rms_rad": 0.10,
+                    "pitch_rms_rad": 0.10,
+                    "rl_action_saturation_rate": 0.20,
+                }
+            ],
+        }
+
+        comparison = self.benchmark.compare_summaries(baseline, candidate)
+
+        self.assertFalse(comparison["pass"])
+        self.assertAlmostEqual(comparison["candidate_mean_action_saturation"], 0.20)
+        self.assertAlmostEqual(comparison["max_acceptable_action_saturation"], 0.15)
+
     def test_segment_summary_scores_shaped_execution_command(self):
         samples = [
             {

@@ -1,20 +1,22 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""DirectRLEnv config for the Tarantula structured-compensation Stage A task.
+"""DirectRLEnv config for the Tarantula Stage B wheel + hip residual task.
 
-Action space = 3D:
+Action space = 9D by default:
   action[0] = bounded effective-track scale correction
   action[1] = bounded left-drive scale correction
   action[2] = bounded right-drive scale correction
+  action[3:9] = direct bounded hip/arm position targets, LEGS order
 
-Suspension is held at a neutral target in Isaac. Gazebo deployment keeps hip
-posture on the v2 trajectory controller for the same Stage A separation.
+The first three dimensions preserve the classical skid-steer residual contract.
+The final six dimensions let the policy command bounded hip position targets
+directly. The PPO network size is intentionally unchanged from Stage A.
 
-Observation space = 47D:
+Observation space = 53D:
   projected_gravity_b(3) + root_ang_vel_b(3)
   + susp_joint_pos(6) + susp_joint_vel(6) + wheel_joint_vel(6)
   + wheel_force_b(18)      <- wheel-axis F/T equivalent, normalized by nominal wheel load
-  + cmd_vx(1) + cmd_wz(1) + prev_action(3)
+  + cmd_vx(1) + cmd_wz(1) + prev_action(9)
 """
 
 from isaaclab.envs import DirectRLEnvCfg
@@ -32,20 +34,24 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 4
     episode_length_s = 15.0
-    action_space = 3
-    observation_space = 47  # see module docstring
+    action_space = 9
+    observation_space = 53  # see module docstring
     state_space = 0
 
     # action scaling: policy outputs ±1 -> bounded structured compensation
-    stand_susp_target = 0.0         # rad, Stage A neutral suspension target
+    stand_susp_target = 0.0         # rad, fallback neutral suspension target
     pure_turn_track_scale = 3.0     # effective track scale for near-zero-vx turns
     turn_enter_wz = 0.08            # rad/s, stop-turn-drive enter threshold
     turn_exit_wz = 0.04             # rad/s, stop-turn-drive exit threshold
     track_scale_delta_limit = 0.30  # fractional correction around base track scale
     drive_scale_delta_limit = 0.20  # fractional correction around left/right drive scale
     max_abs_wheel_omega = 6.0       # rad/s, final per-wheel velocity target limit
+    hip_action_enabled = True
+    hip_action_target_limit = 0.30   # rad, direct hip target clamp for Stage B baseline
+    reward_hip_action_rate_weight = 0.015
+    reward_hip_action_magnitude_weight = 0.01
 
-    # driving: Stage A trains the shaped stop-turn-drive baseline.
+    # driving: Stage B trains the shaped stop-turn-drive baseline plus hip targets.
     wheel_radius = 0.13  # m, from tarantula_common.xacro
     command_vx_range = (-0.3, 0.3)  # m/s
     command_wz_range = (-0.4, 0.4)  # rad/s
@@ -76,6 +82,12 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     reward_tracking_lin_vel_sigma = 0.12
     reward_tracking_yaw_rate_weight = 1.2
     reward_tracking_yaw_rate_sigma = 0.12
+    reward_delta_lin_vel_weight = 0.45
+    reward_delta_yaw_rate_weight = 0.55
+    baseline_vx_error_floor = 0.06
+    baseline_vx_error_fraction = 0.45
+    baseline_wz_error_floor = 0.12
+    baseline_wz_error_fraction = 0.65
     reward_yaw_sign_weight = 0.25
     reward_pure_turn_drift_weight = 0.35
     reward_orientation_weight = 0.4
@@ -84,10 +96,12 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     reward_lin_vel_z_weight = 0.5
     reward_lateral_vel_weight = 0.08
     reward_stuck_weight = 0.25
-    reward_action_rate_weight = 0.01
-    reward_action_magnitude_weight = 0.002
-    reward_action_saturation_weight = 0.04
-    action_saturation_soft_limit = 0.85
+    reward_action_rate_weight = 0.03
+    reward_action_magnitude_weight = 0.02
+    reward_action_saturation_weight = 0.50
+    action_saturation_soft_limit = 0.65
+    reward_wheel_target_saturation_weight = 0.35
+    wheel_target_saturation_soft_limit = 0.85
     reward_joint_limit_weight = 0.05
     reward_alive_bonus = 0.05
     reward_termination_penalty = 8.0

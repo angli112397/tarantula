@@ -46,11 +46,11 @@ NUM_ENVS=2 scripts/run_ppo_train_v5.sh \
   --command-profile stage0
 ```
 
-Stage A trains against the same stop-turn-drive execution command used in
+Stage B trains against the same stop-turn-drive execution command used in
 Gazebo. Raw `/cmd_vel` samples are shaped before observation, reward, and eval
 metrics.
 
-Stage A training logs must include `Episode_Reward/*`,
+Stage B training logs must include `Episode_Reward/*`,
 `Episode_Termination/*`, and `Episode_Metric/*`. The metric group mirrors the
 Gazebo command-tracking benchmark: command tracking error, roll/pitch,
 action saturation, and wheel-target saturation.
@@ -85,8 +85,15 @@ python3 src/tarantula_isaac/eval_policy_v5.py \
   --num-envs 16 \
   --terrain-dir "$(pwd)/generated/terrains/gazebo_demo/42" \
   --out generated/benchmarks/isaac_eval/policy_summary.json
+
+python3 scripts/isaac_eval_gate.py \
+  --open-loop generated/benchmarks/isaac_eval/open_loop_summary.json \
+  --policy generated/benchmarks/isaac_eval/policy_summary.json \
+  --out generated/benchmarks/isaac_eval/policy_gate.json
 ```
 
 Reject a policy before Gazebo if Isaac eval shows immediate spawn termination,
 near-zero displacement on drive segments, large shaped-command tracking error,
-or persistent action saturation.
+or persistent action saturation. The Stage B gate requires at least 10%
+weighted-score improvement over open loop, mean action saturation <= 0.15, zero
+hard terminations, and no turn-authority regression.

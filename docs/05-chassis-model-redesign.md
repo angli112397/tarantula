@@ -27,10 +27,10 @@
    - 不再使用被动 rocker、虚拟弹簧滑柱或 wheel-end 被动悬挂；
    - 不再保留旧模型或 fixed-hip 诊断分支。
 
-2. 轮胎视觉和碰撞 baseline 都使用圆柱：
-   - launch 参数：`wheel_collision:=cylinder`;
-   - 原因：当前 Gazebo GUI 已验证 cylinder 在 v2 baseline 上具备稳定直行和完美原地转向；
-   - `sphere` 保留为崎岖地形接触 A/B，不作为默认运动学验收模型。
+2. 轮胎 visual 保持圆柱，collision baseline 使用球体：
+   - launch 参数：`wheel_collision:=sphere`;
+   - 原因：单坡 A/B 显示 cylinder 轮速可跟随但上坡牵引效率显著低于 sphere；
+   - `cylinder` 保留为接触物理 A/B，不作为默认地形验收模型。
 
 3. 底盘腹部 collision 显式命名并略收腹：
    - `base_belly_collision`
@@ -50,16 +50,16 @@
    - 不再写 `<springStiffness>` / `<implicitSpringDamper>`；
    - Gazebo v2 hip 使用 `joint_trajectory_controller/JointTrajectoryController`；
    - 控制入口是 `/suspension_controller/joint_trajectory`，目标角度从当前自然姿态初始化；
-   - Stage A RL 不直接输出 hip 命令；hip RL 留到后续 Ring 5。
+   - 当前 Stage B RL 直接输出 bounded hip target，但仍通过同一个 trajectory controller 发布。
 
 7. Isaac USD 缓存：
-   - 当前基线：`tarantula_v2_actuated_cylinder_wheels.usd`
+   - 当前基线：`tarantula_v2_actuated_sphere_wheels.usd`
    - `/tmp/tarantula_v2.urdf` 和 `/tmp/tarantula_usd/*.usd` 由源文件 hash
      控制重生，URDF/执行器参数变化后不得复用旧模型。
 
 8. reward 方向同步：
    - baseline reward 只保留速度跟踪、yaw-rate 跟踪、姿态、动作平滑、
-     关节软限位和终止惩罚；
+     动作幅度/饱和惩罚、关节软限位和终止惩罚；
    - `wheel_force_b(18)` 先作为观测和诊断指标，不进入 baseline reward。
 
 9. Gazebo 物理验收使用 v2 直接验收脚本：
@@ -68,20 +68,23 @@
    - 脚本使用当前自然 hip 姿态作为 `initial`，测试结束回到该姿态；
    - 旧 effort hold、wheel contact lab 和 fixed-hip 诊断路径已删除，不作为当前 baseline gate。
 
-10. RL Stage A 为结构化轮速补偿：
-   - Gazebo 中 hip 由 trajectory controller 维持自然/指定姿态；
+10. RL Stage B 为结构化轮速补偿 + 直接髋关节目标：
+   - Gazebo 中 hip 由 trajectory controller 执行 RL 发布的 bounded target；
    - stop-turn-drive + 传统 skid-steer controller 负责 `/cmd_vel -> wheel_target`；
-   - actor action 只输出 3 路结构化补偿：
+   - actor action 前 3 路输出结构化轮速补偿：
      `track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`；
+   - actor action 后 6 路输出 `fl/fr/ml/mr/rl/rr` hip target；
    - 最终轮速限幅从 actor `.npz` metadata 读取；
+   - hip target clamp 从 actor `.npz` metadata 读取，当前 Stage B baseline 使用 0.30 rad；
    - 先验证 `cmd_vx/cmd_wz` obedience；
-   - 悬挂/姿态 RL 留到后续 ring，以 hip target residual 的形式重新设计。
+   - 进入 Gazebo 前必须通过 `scripts/isaac_eval_gate.py`，不能只看 reward
+     或最后 checkpoint。
 
 ## 后续验证
 
 - Gazebo：RL low-speed flat / single bump / side step / rough terrain 行为。
 - Gazebo physics baseline：v2 GUI + `gazebo_chassis_pose_diffdrive_test.py`。
-- Wheel collision A/B：只切换 `wheel_collision:=sphere|cylinder`，其他 launch
+- Wheel collision A/B：默认 `sphere`，只在接触物理复核时切换 `wheel_collision:=cylinder`，其他 launch
   参数、地形、hip profile 和 benchmark 序列保持一致。
 - Isaac：重新生成 USD 后检查 obs/action 无 NaN。
 - 对齐项：轮速响应、轮端力分布、同一地形的 roll/pitch RMS、关节力矩饱和率。
@@ -99,7 +102,7 @@
 改动：
 
 - wheel radius: `0.12 -> 0.13 m`
-  - 目的：提高台阶/碎石通过裕度，降低球形 collision 在小障碍上的卡滞概率。
+  - 目的：提高台阶/碎石通过裕度，降低轮端 collision 在小障碍上的卡滞概率。
   - 同步：`controllers_v2_position.yaml`、`motion_control_node.py`、`suspension_env_cfg.py`。
 - wheel width/mass: `0.07 -> 0.075 m`, `1.5 -> 1.7 kg`
   - 目的：让轮子视觉和惯量更接近越障轮，不让轮端过轻导致接触尖峰过敏。

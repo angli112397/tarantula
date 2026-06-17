@@ -91,8 +91,8 @@ Current model baseline:
 - six single-DOF hip/arm joints commanded by `JointTrajectoryController`;
 - one driven wheel per arm;
 - wheel visual is cylindrical;
-- wheel collision baseline is cylindrical;
-- `sphere` is retained only as a rough-terrain contact A/B experiment;
+- wheel collision baseline is spherical for Gazebo/Isaac terrain-contact stability;
+- `cylinder` is retained only as a contact-physics A/B experiment;
 - wheel-end F/T is the deployable wheel-load signal;
 - geometry contact truth is not a policy input;
 - Gazebo hip command is a bounded position trajectory profile, initialized from the current natural posture;
@@ -109,7 +109,7 @@ Launch:
 ros2 launch tarantula_bringup sim.launch.py \
   gui:=true robot_model:=tarantula_v2.urdf.xacro motion_control:=true \
   start_motion_control:=false rl_compensation_enabled:=false \
-  wheel_collision:=cylinder spawn_z:=0.55
+  wheel_collision:=sphere spawn_z:=0.55
 ```
 
 Default world:
@@ -143,8 +143,8 @@ Controller path:
   experiment, not part of the frozen baseline, because it can move the pure-turn
   rotation center away from the chassis center;
 - `motion_control_node` is only the ROS I/O wrapper around that controller;
-- hip posture is owned by the v2 `JointTrajectoryController`; Stage A does not
-  send hip residual commands.
+- hip posture is executed by the v2 `JointTrajectoryController`; Stage B may
+  send bounded hip targets through the same controller.
 - use this before RL to verify wheel signs, contact, terrain, and basic command response.
 - optional RL compensation path:
   - `wheel_velocity_controller`
@@ -153,8 +153,9 @@ Controller path:
   - `/suspension_controller/joint_trajectory`
   - launch with `motion_control:=true start_motion_control:=true rl_compensation_enabled:=true`;
   - `rl_compensation_enabled:=false` runs the same motion node without policy weights;
-  - Stage A final wheel command is always the shaped motion-control baseline
-    plus bounded structured compensation.
+  - Stage B final wheel command is always the shaped motion-control baseline
+    plus bounded structured compensation; a 9D policy may also publish bounded
+    hip targets.
 - legacy Gazebo effort-hold, wheel contact lab, and fixed-hip diagnostic paths
   have been removed. Use the v2 direct acceptance script as the baseline gate.
 
@@ -220,30 +221,35 @@ posture profile or future hip residual
 ```
 
 Current baseline profiles are `neutral`, `front_down`, `rear_down`, `raise`,
-`lower`, and `left_trim` in `tarantula_control.suspension_core`. Stage A does
-not command hip residuals. Ring 5 may add RL hip-target residuals around these
-profiles after Ring 1 motion tracking is stable.
+`lower`, and `left_trim` in `tarantula_control.suspension_core`. Stage B makes
+hip targets part of the main RL action, so these profiles remain direct
+acceptance/debug tools rather than the RL baseline.
 
 ## RL Contract
 
-Stage A action space: 3D.
+Stage B action space: 9D.
 
 ```text
 action[0] = track_scale_delta, bounded by +/-0.30
 action[1] = left_drive_scale_delta, bounded by +/-0.20
 action[2] = right_drive_scale_delta, bounded by +/-0.20
+action[3:9] = direct hip position targets, fl/fr/ml/mr/rl/rr order
 
 effective_track = calibrated_track * (1 + track_scale_delta)
 left_wheel      = skid_steer_left(exec_vx, exec_wz, effective_track) * (1 + left_drive_scale_delta)
 right_wheel     = skid_steer_right(exec_vx, exec_wz, effective_track) * (1 + right_drive_scale_delta)
 wheel_target    = clamp([left,right,left,right,left,right], -6.0, 6.0) rad/s
+hip_target      = clamp(action[3:9], -1, 1) * hip_action_target_limit
 ```
 
-The action is gated by execution mode: yaw-active commands may use
+The wheel residual action is gated by execution mode: yaw-active commands may use
 `track_scale_delta`, drive-active commands may use left/right drive deltas, and
-STOP uses zero compensation.
+STOP uses zero wheel compensation. Hip targets are clipped by
+`hip_action_target_limit`; the current Stage B baseline is 0.30 rad, below the
+full 0.45 rad physical envelope. Stage A 47D/3D remains only as a
+wheel-only ablation via `--wheel-only`.
 
-Stage A observation space: 47D.
+Stage B observation space: 53D.
 
 ```text
 projected_gravity_b(3)
@@ -254,14 +260,14 @@ wheel_joint_vel(6)
 wheel_force_b(18)
 exec_cmd_vx(1)
 exec_cmd_wz(1)
-prev_action(3)
+prev_action(9)
 ```
 
-Gazebo Stage A deployment uses the v2 `JointTrajectoryController` for hip
+Gazebo Stage B deployment uses the v2 `JointTrajectoryController` for hip
 posture and `motion_control_node` for `/wheel_velocity_controller/commands`.
 Set `rl_compensation_enabled:=false` to run a pure classical controller without
-policy weights, or `rl_compensation_enabled:=true` to add the current 47D/3D
-structured-compensation actor. Isaac uses simulator state for reward/eval only
+policy weights, or `rl_compensation_enabled:=true` to add the current 53D/9D
+wheel + hip actor. Isaac uses simulator state for reward/eval only
 and contact-force backend for the wheel-force equivalent. The actor observation
 does not include simulator root linear velocity. Optional `truth_odom:=true` publishes
 `/tarantula/truth_odom` from Gazebo truth pose for short diagnostics, but it is
@@ -279,11 +285,11 @@ Motion-compensation dimension coverage:
 | traction/load redistribution | per-wheel force and wheel velocity | wheel-end 3D F/T in Gazebo, contact-force equivalent in Isaac, wheel velocities | covered for simulation; real hardware needs wheel-end F/T or current/load estimator |
 | stuck detection | high wheel speed/action with poor reward progress, pitch/force context | wheel velocities, command, force, pitch; truth velocity only in reward/eval; `/rl_policy/status` exposes action saturation and measured yaw rate | covered for training and Gazebo deployment diagnostics |
 | side-slope correction | roll/projected gravity, yaw error, force asymmetry | projected gravity, yaw rate, wheel force | covered |
-| terrain preview | local heightmap ahead of robot | generated heightmap exists in sim, not in Stage A obs | deferred to Stage C |
-| absolute localization/nav quality | odom/SLAM pose | available through Gazebo/Nav stack, not policy obs | not needed for Stage A compensation |
+| terrain preview | local heightmap ahead of robot | generated heightmap exists in sim, not in Stage B obs | deferred to Stage C |
+| absolute localization/nav quality | odom/SLAM pose | available through Gazebo/Nav stack, not policy obs | not needed for Stage B compensation |
 
-Current sensors and actuators are sufficient for Stage A yaw/slip/slope/stuck
-structured wheel compensation in simulation. The main real-world gap is not a new
+Current sensors and actuators are sufficient for Stage B yaw/slip/slope/stuck
+wheel + hip compensation in simulation. The main real-world gap is not a new
 actuator; it is a deployable velocity source and deployable wheel-load estimate.
 Wheel-end F/T covers the paper-style load signal if the hardware can implement
 it. If not, motor current plus suspension deflection/load calibration is the
@@ -299,7 +305,7 @@ Sensor decision by development ring:
 | 1/2 | deployable wheel odometry topic | add before Nav/RL deployment gates | needed as an engineering interface; Gazebo truth odom remains diagnostic only |
 | 2/3 | `/rl_policy/status` | keep | exposes RL enable state, action values, action saturation, wheel-command magnitude, current command, and measured yaw rate |
 | 3 | geometry contact booleans | do not add | not deployable and encourages policies to depend on contact truth |
-| 5 | hip torque/current estimate | defer | useful for posture RL and load inference, but not needed for Stage A structured compensation |
+| 5 | hip torque/current estimate | defer | useful for posture/load inference, but not needed for the current Stage B baseline |
 | 6/7 | terrain preview from heightmap/stereo/lidar | defer to Stage C | papers use exteroception for harder terrain, but adding it before baseline parity will hide model/control bugs |
 
 Literature alignment:
@@ -321,7 +327,7 @@ Reward baseline follows the trimmed rough-terrain locomotion pattern used by leg
 
 ```text
 + track forward velocity command
-+ track yaw-rate command with elevated Stage A weight
++ track yaw-rate command with elevated Stage B weight
 + yaw direction/sign correctness for nonzero turn commands
 + keep base orientation near level
 - penalize vertical base velocity
@@ -329,13 +335,14 @@ Reward baseline follows the trimmed rough-terrain locomotion pattern used by leg
 - penalize low forward progress under nonzero forward command as a stuck proxy
 - penalize roll/pitch angular velocity
 - penalize action rate
-- penalize action magnitude lightly
+- penalize action magnitude
+- penalize action saturation strongly
 - penalize soft suspension joint-limit approach
 + small alive bonus
 - termination penalty
 ```
 
-Stage A command sampling is intentionally not uniform random over a wide
+Stage B command sampling is intentionally not uniform random over a wide
 `cmd_vel` box. During training, each environment periodically resamples one of three
 baseline command families so yaw does not disappear into near-zero angular
 commands and one episode is not dominated by a single easy command:
@@ -354,7 +361,7 @@ into pure-turn execution before observation, reward, and benchmark scoring. The
 Isaac evaluation and yaw-authority sweeps disable command resampling and set
 deterministic segment commands.
 
-Wheel-load balance is not part of the Stage A reward. It remains an observation
+Wheel-load balance is not part of the Stage B reward. It remains an observation
 and diagnostic metric; adding it to reward is deferred until the vehicle can
 already traverse terrain reliably.
 
@@ -402,7 +409,11 @@ Traditional skid-steer sign convention:
 The eval records spawn health, segment displacement, reward, time-averaged
 command tracking error, final segment velocity, roll/pitch peak, action
 saturation, and termination counts. A policy that does not move or that
-saturates actions in Isaac is not eligible for Gazebo judgement.
+saturates actions in Isaac is not eligible for Gazebo judgement. Gate the two
+JSON summaries with `scripts/isaac_eval_gate.py`; Stage B passes only if the
+policy weighted score is at least 10% lower than open loop, mean action
+saturation is <= 0.15, hard terminations are zero, and pure-turn authority does
+not regress in either direction.
 
 ## Verified Smoke Baseline
 
@@ -424,8 +435,9 @@ Current verified checks:
 - `scripts/gazebo_chassis_pose_diffdrive_test.py` verifies direct wheel
   traction: all-wheel positive/negative commands move forward/backward and
   left/right split commands produce yaw.
-- current Stage A contract is 47D actor observation and 3D structured
-  compensation. `yaw_authority_sweep.py` sweeps `track_action`.
+- current Stage B contract is 53D actor observation and 9D action: three wheel
+  residual dimensions plus six direct hip targets. `yaw_authority_sweep.py`
+  remains a wheel-only diagnostic.
 
 ## Next Required Work
 
@@ -437,20 +449,21 @@ until the gate passes.
 | 0 | Gazebo direct model baseline | v2 geometry, hip trajectory, wheel contact only | `turn-only` and `posture-only` GUI/script tests pass |
 | 1 | Classical motion baseline | `/cmd_vel -> shaped execution -> six wheel velocities`, no RL | Gazebo command tracking passes stop, straight/reverse, pure turns, and shaped high-yaw commands |
 | 2 | Isaac open-loop parity | same terrain and model parameters | Isaac open-loop segment metrics agree with Gazebo direction/sign/order |
-| 3 | Stage A structured RL | track scale and left/right drive scale only | deterministic Isaac eval beats open-loop without high action edge-rate |
+| 3 | Stage B structured RL | track scale, left/right drive scale, and six direct hip targets | Isaac gate passes: >=10% weighted-score improvement, <=0.15 mean action saturation, no hard terminations, no turn-authority regression, no posture instability |
 | 4 | Gazebo structured deployment | exported `.npz` only | Gazebo benchmark improves or preserves classical baseline |
-| 5 | RL posture control | hip target residuals, no geometry change | posture policy improves rough-terrain stability without breaking Ring 1 |
+| 5 | RL posture refinement | reward and clamp tuning for hip targets, no geometry change | posture policy improves rough-terrain stability without breaking Ring 1 |
 | 6 | Outer model tuning | wheelbase, track, arm length, wheel radius, COM, contact parameters | A/B result improves gates across Gazebo and Isaac |
 | 7 | Terrain curriculum widening | terrain difficulty rows and unseen seeds | policy survives wider terrain without regressions on Ring 0/1 |
 
 Immediate rules:
 
 1. Current baseline model is `tarantula_v2.urdf.xacro` with
-   `wheel_collision:=cylinder`. Do not change it while debugging RL.
-2. Treat all previous actors as chain-validation artifacts, not deployment
-   baselines.
-3. Keep the 3D structured compensation contract as Stage A because it preserves
-   the classical control boundary.
+   `wheel_collision:=sphere`. Do not change it while debugging RL.
+2. Treat all previous actors and 200-iteration runs as chain-validation
+   artifacts, not deployment baselines.
+3. Keep the Stage B network hidden size at `[512, 256, 128]`, matching common
+   rough-terrain locomotion PPO baselines. Do not add recurrence, transformers,
+   or exteroceptive encoders until this MLP baseline fails a clear gate.
 4. Do not continue long RL runs just to compensate for a bad baseline. If Ring
    0 or Ring 1 fails, fix model/control before training.
 5. Do not split every symptom into a separate investigation. Use the ring gate:
@@ -460,7 +473,8 @@ Immediate rules:
    adjust only bounded `track_scale_delta` and left/right drive deltas. Reject
    policies with high action edge-rate even if reward improves.
 7. Run deterministic Isaac eval in `open_loop` and `npz` modes before Gazebo RL
-   deployment.
+   deployment, then run `scripts/isaac_eval_gate.py`. Export the best checkpoint
+   that passes the gate, not necessarily the latest or highest-reward checkpoint.
 8. Use `/rl_policy/status` and `gazebo_cmd_tracking_benchmark.py compare` before
    longer deployment tests so saturation and tracking regressions are visible.
 

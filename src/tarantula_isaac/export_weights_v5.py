@@ -8,6 +8,7 @@ Usage (with isaac_venv active, from repo root):
 
 import argparse
 import pathlib
+import re
 import sys
 
 parser = argparse.ArgumentParser()
@@ -16,6 +17,7 @@ parser.add_argument("--npz-out", required=True, help="Path to write raw actor we
 parser.add_argument("--max-abs-wheel-omega", type=float, default=None)
 parser.add_argument("--track-scale-delta-limit", type=float, default=None)
 parser.add_argument("--drive-scale-delta-limit", type=float, default=None)
+parser.add_argument("--hip-action-target-limit", type=float, default=None)
 args = parser.parse_args()
 
 # Isaac Lab imports NOT needed -- torch only
@@ -70,33 +72,42 @@ def find_key(sd, patterns):
 actor_keys = find_key(model_sd, ["actor.model.layers", "actor_body", "actor.0", "actor.2"])
 print(f"[export] Candidate actor keys: {actor_keys[:15]}")
 
-# Determine actual prefix
 npz_data = {}
-for prefix_try in [
-    ("mlp.0",               "mlp.2",               "mlp.4"),    # flat (rsl_rl v5 actor_state_dict)
-    ("actor.model.layers.0","actor.model.layers.2", "actor.model.layers.4"),
-    ("actor_body.0",        "actor_body.2",          "actor_body.4"),
-    ("actor.0",             "actor.2",               "actor.4"),
-]:
-    l0, l2, l4 = prefix_try
-    if f"{l0}.weight" in model_sd:
-        npz_data["mlp.0.weight"] = model_sd[f"{l0}.weight"].numpy()
-        npz_data["mlp.0.bias"]   = model_sd[f"{l0}.bias"].numpy()
-        npz_data["mlp.2.weight"] = model_sd[f"{l2}.weight"].numpy()
-        npz_data["mlp.2.bias"]   = model_sd[f"{l2}.bias"].numpy()
-        npz_data["mlp.4.weight"] = model_sd[f"{l4}.weight"].numpy()
-        npz_data["mlp.4.bias"]   = model_sd[f"{l4}.bias"].numpy()
-        print(f"[export] Using actor key prefix: {l0}")
+
+def _linear_layer_keys(sd: dict, stem: str) -> list[tuple[int, str]]:
+    pattern = re.compile(rf"^{re.escape(stem)}\.(\d+)\.weight$")
+    layers = []
+    for key in sd:
+        match = pattern.match(key)
+        if not match:
+            continue
+        idx = int(match.group(1))
+        bias_key = f"{stem}.{idx}.bias"
+        if bias_key in sd:
+            layers.append((idx, f"{stem}.{idx}"))
+    return sorted(layers)
+
+
+linear_layers: list[tuple[int, str]] = []
+for stem in ("mlp", "actor.model.layers", "actor_body", "actor"):
+    linear_layers = _linear_layer_keys(model_sd, stem)
+    if linear_layers:
+        print(f"[export] Using actor MLP stem: {stem}, linear layers: {[idx for idx, _ in linear_layers]}")
         break
 
-if not npz_data:
+if not linear_layers:
     print("[ERROR] Could not locate actor MLP weights in checkpoint. Dump all keys:")
     for k in model_sd:
         print(f"  {k}: {model_sd[k].shape}")
     sys.exit(1)
 
+for export_idx, (_, source_prefix) in enumerate(linear_layers):
+    npz_data[f"mlp.{export_idx}.weight"] = model_sd[f"{source_prefix}.weight"].numpy()
+    npz_data[f"mlp.{export_idx}.bias"] = model_sd[f"{source_prefix}.bias"].numpy()
+
 obs_dim = int(npz_data["mlp.0.weight"].shape[1])
-action_dim = int(npz_data["mlp.4.weight"].shape[0])
+last_layer_idx = len(linear_layers) - 1
+action_dim = int(npz_data[f"mlp.{last_layer_idx}.weight"].shape[0])
 
 # Obs normalizer
 norm_mean = norm_std = None
@@ -151,21 +162,30 @@ if drive_delta_limit is None:
     drive_delta_limit = 0.20
 npz_data["track_scale_delta_limit"] = np.asarray([track_delta_limit], dtype=np.float32)
 npz_data["drive_scale_delta_limit"] = np.asarray([drive_delta_limit], dtype=np.float32)
+hip_action_target_limit = (
+    args.hip_action_target_limit
+    if args.hip_action_target_limit is not None
+    else _read_env_yaml_float(ckpt_path, "hip_action_target_limit")
+)
+if hip_action_target_limit is None:
+    hip_action_target_limit = 0.30
+npz_data["hip_action_target_limit"] = np.asarray([hip_action_target_limit], dtype=np.float32)
 
 # Validate shapes
 print(f"[export] MLP shapes:")
-print(f"  mlp.0.weight: {npz_data['mlp.0.weight'].shape}  (expect [128,47])")
-print(f"  mlp.0.bias:   {npz_data['mlp.0.bias'].shape}    (expect [128])")
-print(f"  mlp.2.weight: {npz_data['mlp.2.weight'].shape}  (expect [128,128])")
-print(f"  mlp.4.weight: {npz_data['mlp.4.weight'].shape}  (expect [3,128])")
+for layer_idx in range(len(linear_layers)):
+    print(f"  mlp.{layer_idx}.weight: {npz_data[f'mlp.{layer_idx}.weight'].shape}")
+    print(f"  mlp.{layer_idx}.bias:   {npz_data[f'mlp.{layer_idx}.bias'].shape}")
 print(f"  obs mean:     {npz_data['obs_normalizer._mean'].shape}  (expect [{obs_dim}])")
 print(f"  wheel clamp:  {float(npz_data['max_abs_wheel_omega'][0])} rad/s")
 print(f"  track delta:  {float(npz_data['track_scale_delta_limit'][0])}")
 print(f"  drive delta:  {float(npz_data['drive_scale_delta_limit'][0])}")
-assert obs_dim == 47, f"Expected current Stage A obs dim 47, got {obs_dim}"
-assert action_dim == 3, f"Expected current Stage A action dim 3, got {action_dim}"
-assert npz_data["mlp.0.weight"].shape == (128, obs_dim), f"Expected (128,{obs_dim}), got {npz_data['mlp.0.weight'].shape}"
-assert npz_data["mlp.4.weight"].shape == (action_dim, 128), f"Expected ({action_dim},128), got {npz_data['mlp.4.weight'].shape}"
+print(f"  hip target:   {float(npz_data['hip_action_target_limit'][0])} rad")
+assert (obs_dim, action_dim) in {(47, 3), (53, 9)}, (
+    f"Expected Stage A 47D/3D or Stage B 53D/9D actor, got {obs_dim}D/{action_dim}D"
+)
+assert npz_data["mlp.0.weight"].shape[1] == obs_dim
+assert npz_data[f"mlp.{last_layer_idx}.weight"].shape[0] == action_dim
 assert npz_data["obs_normalizer._mean"].shape == (obs_dim,), f"Expected ({obs_dim},), got {npz_data['obs_normalizer._mean'].shape}"
 
 npz_path = pathlib.Path(args.npz_out)

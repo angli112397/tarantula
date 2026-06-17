@@ -4,10 +4,9 @@ Current baseline posture control is intentionally simple and deployable:
 
 * Gazebo commands hip/arm joints through
   ``/suspension_controller/joint_trajectory``.
-* Isaac holds the same joints at the neutral target during Stage A motion
-  compensation training.
-* Future posture RL should output bounded hip target residuals around these
-  profiles, not joint torques or simulator-only contact logic.
+* Isaac and Gazebo use the same joint order for Stage B hip target commands.
+* Stage B posture RL outputs bounded hip position targets, not joint torques or
+  simulator-only contact logic.
 
 This module has no ROS dependencies so it can be shared by Gazebo nodes, Isaac
 environments, and offline acceptance scripts.

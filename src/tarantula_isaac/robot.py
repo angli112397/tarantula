@@ -19,16 +19,16 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 TARANTULA_USD_DIR = "/tmp/tarantula_usd"
-TARANTULA_USD_NAME = "tarantula_v2_actuated_cylinder_wheels.usd"
+TARANTULA_USD_NAME = "tarantula_v2_actuated_sphere_wheels.usd"
 TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, TARANTULA_USD_NAME)
 
-# Generated via: xacro tarantula_core_v2.urdf.xacro wheel_collision:=cylinder lidar:=false > URDF_PATH
+# Generated via: xacro tarantula_core_v2.urdf.xacro wheel_collision:=sphere lidar:=false > URDF_PATH
 URDF_PATH = "/tmp/tarantula_v2.urdf"
 URDF_STAMP_PATH = f"{URDF_PATH}.sha256"
 USD_STAMP_PATH = os.path.join(TARANTULA_USD_DIR, f"{TARANTULA_USD_NAME}.sha256")
 
 # Velocity-drive P gain for wheel_*_joint (rad/s -> N*m). Wheel limit is
-# effort=38 N*m / velocity=30 rad/s. Stage A uses a ±6 rad/s final wheel target
+# effort=38 N*m / velocity=30 rad/s. Stage B uses a ±6 rad/s final wheel target
 # envelope around the scheduled skid-steer baseline. This gain preserves enough
 # yaw authority for large differential wheel targets.
 WHEEL_DRIVE_GAIN = 12.7
@@ -90,7 +90,7 @@ def _xacro_env() -> dict[str, str]:
 def _ensure_core_urdf(urdf_path: str) -> None:
     """Generate the temporary Isaac URDF from xacro when sources changed."""
     source_paths = _xacro_sources()
-    source_hash = _fingerprint(source_paths, extra="v2;wheel_collision=cylinder;lidar=false")
+    source_hash = _fingerprint(source_paths, extra="v2;wheel_collision=sphere;lidar=false")
     if os.path.exists(urdf_path) and _read_stamp(URDF_STAMP_PATH) == source_hash:
         return
 
@@ -99,13 +99,13 @@ def _ensure_core_urdf(urdf_path: str) -> None:
     if not os.path.exists(xacro_bin):
         raise FileNotFoundError(
             f"{urdf_path} not found and xacro is unavailable. Source ROS 2 Humble or install xacro, then run:\n"
-            f"  xacro {xacro_path} wheel_collision:=cylinder lidar:=false > {urdf_path}"
+            f"  xacro {xacro_path} wheel_collision:=sphere lidar:=false > {urdf_path}"
         )
     if not xacro_path.exists():
         raise FileNotFoundError(f"missing Tarantula xacro source: {xacro_path}")
 
     os.makedirs(os.path.dirname(urdf_path), exist_ok=True)
-    command = [xacro_bin, str(xacro_path), "wheel_collision:=cylinder", "lidar:=false"]
+    command = [xacro_bin, str(xacro_path), "wheel_collision:=sphere", "lidar:=false"]
     result = subprocess.run(
         command,
         check=False,

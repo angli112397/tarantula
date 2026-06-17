@@ -7,7 +7,7 @@ Prerequisite: start Gazebo with the RL policy path, for example:
     gui:=false robot_model:=tarantula_v2.urdf.xacro \\
     motion_control:=true start_motion_control:=true \\
     rl_compensation_enabled:=true truth_odom:=false \\
-    wheel_collision:=cylinder policy_weights_npz:=/path/to/cmd_vel_actor.npz \\
+    wheel_collision:=sphere policy_weights_npz:=/path/to/cmd_vel_actor.npz \\
     spawn_z:=0.55
 
 The benchmark publishes a fixed /cmd_vel sequence, samples Gazebo truth pose via
@@ -58,6 +58,7 @@ DEFAULT_SEQUENCE = [
 LEGS = ("fl", "fr", "ml", "mr", "rl", "rr")
 HIP_JOINTS = tuple(f"susp_{leg}_joint" for leg in LEGS)
 WHEEL_CMD_FIELDS = tuple(f"wheel_cmd_{leg}" for leg in LEGS)
+WHEEL_VEL_FIELDS = tuple(f"wheel_vel_{leg}" for leg in LEGS)
 HIP_POS_FIELDS = tuple(f"hip_pos_{leg}" for leg in LEGS)
 WHEEL_FORCE_FIELDS = tuple(f"wheel_force_norm_{leg}" for leg in LEGS)
 RL_ACTION_FIELDS = (
@@ -83,7 +84,7 @@ NOMINAL_WHEEL_LOAD_N = 23.1 * 9.81 / 6.0
 MAX_ABS_WHEEL_CMD_RAD_S = 6.0
 WHEEL_CMD_SATURATION_FRACTION = 0.98
 ACTION_SATURATION_THRESHOLD = 0.95
-MAX_ACCEPTABLE_ACTION_SATURATION_RATE = 0.20
+MAX_ACCEPTABLE_ACTION_SATURATION_RATE = 0.15
 HIP_SOFT_LIMIT_RAD = 0.40
 STABILITY_REGRESSION_RATIO = 1.15
 TRACKING_REGRESSION_RATIO = 1.05
@@ -257,11 +258,17 @@ def sample_loop(
             for idx, leg in enumerate(LEGS)
         }
         hip_pos_by_leg = {leg: 0.0 for leg in LEGS}
+        wheel_vel_by_leg = {leg: 0.0 for leg in LEGS}
         if node.last_joint_state is not None:
             positions = dict(zip(node.last_joint_state.name, node.last_joint_state.position))
+            velocities = dict(zip(node.last_joint_state.name, node.last_joint_state.velocity))
             hip_pos_by_leg = {
                 leg: float(positions.get(joint_name, 0.0))
                 for leg, joint_name in zip(LEGS, HIP_JOINTS)
+            }
+            wheel_vel_by_leg = {
+                leg: float(velocities.get(f"wheel_{leg}_joint", 0.0))
+                for leg in LEGS
             }
         status = {
             name: float(node.last_rl_status[idx]) if idx < len(node.last_rl_status) else 0.0
@@ -285,9 +292,11 @@ def sample_loop(
             "vx_error": vx - status.get("status_cmd_vx", cmd_vx),
             "wz_error": wz - status.get("status_cmd_wz", cmd_wz),
             "wheel_cmd_max_abs": max((abs(v) for v in wheel_cmd_by_leg.values()), default=0.0),
+            "wheel_vel_mean_abs": mean([abs(v) for v in wheel_vel_by_leg.values()]),
             "hip_pos_max_abs": max((abs(v) for v in hip_pos_by_leg.values()), default=0.0),
         }
         sample.update({field: wheel_cmd_by_leg[leg] for field, leg in zip(WHEEL_CMD_FIELDS, LEGS)})
+        sample.update({field: wheel_vel_by_leg[leg] for field, leg in zip(WHEEL_VEL_FIELDS, LEGS)})
         sample.update({field: hip_pos_by_leg[leg] for field, leg in zip(HIP_POS_FIELDS, LEGS)})
         sample.update({field: node.last_wheel_force[leg] for field, leg in zip(WHEEL_FORCE_FIELDS, LEGS)})
         sample.update(status)
@@ -325,6 +334,21 @@ def summarize_segment(samples: list[dict]) -> dict:
     pitch_rms = rms([float(s["pitch"]) for s in usable])
     max_hip_pos = max(float(s["hip_pos_max_abs"]) for s in usable)
     max_wheel_cmd = max(float(s["wheel_cmd_max_abs"]) for s in usable)
+    mean_abs_wheel_cmd = mean([
+        abs(sample_value(s, field))
+        for s in usable
+        for field in WHEEL_CMD_FIELDS
+    ])
+    mean_abs_wheel_vel = mean([
+        abs(sample_value(s, field))
+        for s in usable
+        for field in WHEEL_VEL_FIELDS
+    ])
+    wheel_velocity_tracking_ratio = (
+        mean_abs_wheel_vel / mean_abs_wheel_cmd
+        if mean_abs_wheel_cmd > 1.0e-6
+        else 1.0
+    )
     wheel_saturation_threshold = MAX_ABS_WHEEL_CMD_RAD_S * WHEEL_CMD_SATURATION_FRACTION
     wheel_saturation_rate = mean([
         1.0 if sample_value(s, "wheel_cmd_max_abs") >= wheel_saturation_threshold else 0.0
@@ -375,6 +399,9 @@ def summarize_segment(samples: list[dict]) -> dict:
         "roll_rms_rad": roll_rms,
         "pitch_rms_rad": pitch_rms,
         "max_abs_wheel_cmd_rad_s": max_wheel_cmd,
+        "mean_abs_wheel_cmd_rad_s": mean_abs_wheel_cmd,
+        "mean_abs_wheel_vel_rad_s": mean_abs_wheel_vel,
+        "wheel_velocity_tracking_ratio": wheel_velocity_tracking_ratio,
         "wheel_cmd_saturation_rate": wheel_saturation_rate,
         "max_abs_hip_pos_rad": max_hip_pos,
         "max_wheel_force_norm": max_wheel_force,
@@ -473,14 +500,15 @@ def compare_summaries(baseline: dict, candidate: dict) -> dict:
         })
     baseline_score = weighted_tracking_score(baseline)
     candidate_score = weighted_tracking_score(candidate)
+    candidate_mean_action_saturation = mean([
+        float(segment.get("rl_action_saturation_rate", 0.0))
+        for segment in candidate_segments.values()
+    ])
     pass_candidate = (
         bool(segment_names)
         and not hard_failures
         and candidate_score <= baseline_score
-        and mean([
-            float(segment.get("rl_action_saturation_rate", 0.0))
-            for segment in candidate_segments.values()
-        ]) <= MAX_ACCEPTABLE_ACTION_SATURATION_RATE
+        and candidate_mean_action_saturation <= MAX_ACCEPTABLE_ACTION_SATURATION_RATE
     )
     return {
         "baseline_label": baseline.get("label", "baseline"),
@@ -488,6 +516,8 @@ def compare_summaries(baseline: dict, candidate: dict) -> dict:
         "baseline_score": baseline_score,
         "candidate_score": candidate_score,
         "score_delta": candidate_score - baseline_score,
+        "candidate_mean_action_saturation": candidate_mean_action_saturation,
+        "max_acceptable_action_saturation": MAX_ACCEPTABLE_ACTION_SATURATION_RATE,
         "segments_compared": segment_names,
         "segments_improved": improved,
         "segments_regressed": regressed,

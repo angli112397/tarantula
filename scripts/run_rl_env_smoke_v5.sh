@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stage A Isaac Lab environment smoke test
-# Verifies: obs.shape==(N,47), action_space.shape==(N,3), wheel-force sensor alive, no NaN
+# Stage B Isaac Lab environment smoke test
+# Verifies: obs.shape==(N,53), action_space.shape==(N,9), wheel-force sensor alive, no NaN
 # Usage: bash scripts/run_rl_env_smoke_v5.sh
 set -euo pipefail
 
@@ -39,7 +39,7 @@ env = TarantulaSuspensionEnv(cfg=cfg)
 obs_dict, _ = env.reset()
 obs = obs_dict["policy"]
 print(f"[smoke] obs.shape = {obs.shape}")
-assert obs.shape == (cfg.scene.num_envs, 47), f"Expected (N,47), got {obs.shape}"
+assert obs.shape == (cfg.scene.num_envs, 53), f"Expected (N,53), got {obs.shape}"
 assert not obs.isnan().any(), "NaN in initial obs!"
 log = env.extras.get("log", {})
 for key in (
@@ -58,7 +58,7 @@ print(f"[smoke] action_space = {env.action_space}")
 STEPS = 200
 print(f"[smoke] Stepping {STEPS} steps...")
 for i in range(STEPS):
-    action = torch.rand(cfg.scene.num_envs, 3, device=env.device) * 2 - 1
+    action = torch.rand(cfg.scene.num_envs, 9, device=env.device) * 2 - 1
     obs_dict, rew, term, trunc, info = env.step(action)
     obs = obs_dict["policy"]
     if obs.isnan().any():
@@ -71,7 +71,7 @@ for i in range(STEPS):
         sys.exit(1)
 
 print(f"[smoke] Final obs.shape = {obs.shape}, reward mean = {rew.mean():.3f}")
-print("[smoke] PASS - v5 Stage A env OK (obs=47, action=3, wheel-force sensor, no NaN)")
+print("[smoke] PASS - v5 Stage B env OK (obs=53, action=9, wheel-force sensor, no NaN)")
 env.close()
 sim_app.close()
 PYEOF

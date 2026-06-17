@@ -1,4 +1,4 @@
-"""Stage A PPO training -- direct runner (no Hydra task registry needed).
+"""Stage B PPO training -- direct runner (no Hydra task registry needed).
 
 Usage (from repo root, with isaac_venv active):
   python3 src/tarantula_isaac/train_v5.py [--num_envs 64] [--max_iterations 400]
@@ -15,7 +15,7 @@ DEFAULT_TERRAIN_DIR = REPO_ROOT / "generated" / "terrains" / "rl_curriculum" / "
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Stage A PPO training")
+parser = argparse.ArgumentParser(description="Stage B PPO training")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--max_iterations", type=int, default=400)
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to warm-start from")
@@ -104,6 +104,23 @@ parser.add_argument(
     help="Override PPO actor Gaussian initial std. Residual policies should start with small exploration.",
 )
 parser.add_argument(
+    "--hip-action",
+    action="store_true",
+    default=True,
+    help="Deprecated compatibility flag; Stage B hip action is now enabled by default.",
+)
+parser.add_argument(
+    "--wheel-only",
+    action="store_true",
+    help="Legacy Stage A ablation: use 47D observation and 3D wheel residual action only.",
+)
+parser.add_argument(
+    "--hip-action-target-limit",
+    type=float,
+    default=None,
+    help="Stage B hip target clamp in rad.",
+)
+parser.add_argument(
     "--terrain-dir",
     default=str(DEFAULT_TERRAIN_DIR),
     help="Generated terrain directory containing height.npy and metadata.json.",
@@ -160,6 +177,16 @@ def main():
     ensure_tarantula_usd()
 
     env_cfg = TarantulaSuspensionEnvCfg()
+    if args.wheel_only:
+        env_cfg.hip_action_enabled = False
+        env_cfg.action_space = 3
+        env_cfg.observation_space = 47
+    else:
+        env_cfg.hip_action_enabled = True
+        env_cfg.action_space = 9
+        env_cfg.observation_space = 53
+        if args.hip_action_target_limit is not None:
+            env_cfg.hip_action_target_limit = float(args.hip_action_target_limit)
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.terrain = make_shared_heightmap_terrain_cfg(
         args.terrain_dir,
@@ -217,7 +244,8 @@ def main():
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _RSL_RL_VERSION)
 
     log_root = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_v5_stage_a_wheel_only"
+    suffix = "_v5_stage_a_wheel_only" if args.wheel_only else "_v5_stage_b_wheel_hip"
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + suffix
     log_dir = os.path.join(log_root, log_dir)
     os.makedirs(log_dir, exist_ok=True)
     print(f"[INFO] Logging to: {log_dir}")

@@ -18,7 +18,7 @@ DEFAULT_OUT = REPO_ROOT / "generated" / "benchmarks" / "isaac_eval" / "yaw_autho
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Sweep Tarantula Stage A yaw authority in Isaac Lab.")
+parser = argparse.ArgumentParser(description="Sweep Tarantula wheel-only yaw authority in Isaac Lab.")
 parser.add_argument("--terrain-dir", default=str(DEFAULT_TERRAIN_DIR))
 parser.add_argument("--terrain-level-min", type=int, default=None)
 parser.add_argument("--terrain-level-max", type=int, default=None)

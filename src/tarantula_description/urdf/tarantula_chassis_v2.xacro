@@ -99,7 +99,7 @@
     </link>
   </xacro:macro>
 
-  <xacro:macro name="tarantula_chassis_v2" params="prefix:='' wheel_collision:='cylinder'">
+  <xacro:macro name="tarantula_chassis_v2" params="prefix:='' wheel_collision:='sphere'">
     <link name="${prefix}base_link">
       <visual><geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry><xacro:mat_body/></visual>
       <visual>

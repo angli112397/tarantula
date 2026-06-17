@@ -2,7 +2,7 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
   <xacro:include filename="$(find tarantula_description)/urdf/tarantula_chassis_v2.xacro"/>
 
-  <xacro:arg name="wheel_collision" default="cylinder"/>
+  <xacro:arg name="wheel_collision" default="sphere"/>
   <xacro:tarantula_chassis_v2 prefix="" wheel_collision="$(arg wheel_collision)"/>
 
   <xacro:arg name="lidar" default="true"/>

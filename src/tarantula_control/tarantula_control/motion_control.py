@@ -31,6 +31,8 @@ from .suspension_core import LEGS
 
 STAGE_A_OBSERVATION_DIM = 47
 STAGE_A_ACTION_DIM = 3
+STAGE_B_OBSERVATION_DIM = 53
+STAGE_B_ACTION_DIM = 9
 WHEEL_TARGET_DIM = 6
 
 STAGE_A_OBSERVATION_LAYOUT = (
@@ -42,7 +44,7 @@ STAGE_A_OBSERVATION_LAYOUT = (
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
     ("cmd_vx", 1, "shaped execution forward velocity"),
     ("cmd_wz", 1, "shaped execution yaw rate"),
-    ("prev_action", 3, "previous RL structured compensation action"),
+    ("prev_action", 9, "previous Stage B action; legacy Stage A uses 3 values"),
 )
 
 
@@ -191,8 +193,9 @@ class SkidSteerMotionController:
             )
         else:
             raw = np.asarray(compensation_action, dtype=np.float32).reshape(-1)
-        if raw.shape[0] != STAGE_A_ACTION_DIM:
-            raise ValueError(f"Stage A compensation action must have 3 values, got {raw.shape[0]}")
+        if raw.shape[0] < STAGE_A_ACTION_DIM:
+            raise ValueError(f"compensation action must have at least 3 values, got {raw.shape[0]}")
+        raw = raw[:STAGE_A_ACTION_DIM]
         raw = np.clip(raw, -1.0, 1.0)
         return StructuredCompensation(
             track_scale_delta=float(raw[0]) * float(self.config.track_scale_delta_limit),
@@ -299,7 +302,7 @@ def build_stage_a_observation(
     command: MotionCommand,
     prev_action: np.ndarray,
 ) -> np.ndarray:
-    """Build the deployable 47D Stage A observation in the Isaac training order."""
+    """Build the deployable Stage B observation in Isaac order, with Stage A fallback."""
 
     obs_values = (
         list(projected_gravity_b)
@@ -312,6 +315,7 @@ def build_stage_a_observation(
         + list(np.asarray(prev_action, dtype=np.float32).reshape(-1))
     )
     obs = np.asarray(obs_values, dtype=np.float32)
-    if obs.shape[0] != STAGE_A_OBSERVATION_DIM:
-        raise ValueError(f"Stage A observation must be {STAGE_A_OBSERVATION_DIM}D, got {obs.shape[0]}")
+    expected_dim = STAGE_B_OBSERVATION_DIM if np.asarray(prev_action).reshape(-1).shape[0] == STAGE_B_ACTION_DIM else STAGE_A_OBSERVATION_DIM
+    if obs.shape[0] != expected_dim:
+        raise ValueError(f"observation must be {expected_dim}D, got {obs.shape[0]}")
     return obs

@@ -7,7 +7,7 @@ wheel commands, for example:
   ros2 launch tarantula_bringup sim.launch.py \
     gui:=true robot_model:=tarantula_v2.urdf.xacro \
     motion_control:=true start_motion_control:=false rl_compensation_enabled:=false \
-    wheel_collision:=cylinder spawn_z:=0.55
+    wheel_collision:=sphere spawn_z:=0.55
 
 The test drives the current v2 control surface directly:
   - /suspension_controller/joint_trajectory for hip/arm angle targets

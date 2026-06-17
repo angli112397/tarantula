@@ -14,6 +14,7 @@ from tarantula_control.control_interfaces import (
 from tarantula_control.motion_control import (
     CommandShaper,
     STAGE_A_OBSERVATION_DIM,
+    STAGE_B_OBSERVATION_DIM,
     MotionMode,
     MotionControlConfig,
     SkidSteerMotionController,
@@ -106,6 +107,16 @@ class ControlInterfacesTest(unittest.TestCase):
             2.0 * scale,
         ]
         self.assertTrue(all(abs(a - b) < 1e-6 for a, b in zip(wheel, expected)))
+
+    def test_motion_controller_uses_first_three_values_from_stage_b_action(self):
+        controller = SkidSteerMotionController(MotionControlConfig(max_abs_wheel_omega=6.0))
+        command = controller.limit_command(0.26, 0.0)
+        stage_a = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+        stage_b = np.array([0.0, 1.0, 1.0, -1.0, 0.5, 0.25, 0.0, -0.25, 1.0], dtype=np.float32)
+        self.assertEqual(
+            controller.compensated_wheel_targets(command, stage_b),
+            controller.compensated_wheel_targets(command, stage_a),
+        )
 
     def test_motion_controller_clamps_compensated_target(self):
         controller = SkidSteerMotionController(MotionControlConfig(
@@ -215,6 +226,22 @@ class ControlInterfacesTest(unittest.TestCase):
             prev_action=np.zeros(3, dtype=np.float32),
         )
         self.assertEqual(obs.shape, (STAGE_A_OBSERVATION_DIM,))
+
+    def test_stage_b_observation_layout_is_53d(self):
+        zeros = {leg: 0.0 for leg in LEGS}
+        zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
+        command = SkidSteerMotionController().limit_command(0.2, 0.1)
+        obs = build_stage_a_observation(
+            projected_gravity_b=(0.0, 0.0, -1.0),
+            root_ang_vel_b=(0.0, 0.0, 0.0),
+            susp_joint_pos=zeros,
+            susp_joint_vel=zeros,
+            wheel_joint_vel=zeros,
+            wheel_force=zero_forces,
+            command=command,
+            prev_action=np.zeros(9, dtype=np.float32),
+        )
+        self.assertEqual(obs.shape, (STAGE_B_OBSERVATION_DIM,))
 
     def test_posture_profiles_are_bounded_six_leg_targets(self):
         for name in ("neutral", "front_down", "rear_down", "raise", "lower", "left_trim"):
