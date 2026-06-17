@@ -1,9 +1,11 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""RSL-RL PPO runner config for Tarantula Stage A wheel-only task.
+"""RSL-RL PPO runner config for Tarantula Stage A structured compensation.
 
-MLP (obs=41, action=6): six independent wheel velocities. Suspension is held
-by the environment in Isaac and by stand_suspension_hold in Gazebo.
+MLP (obs=47, action=3): bounded effective-track and left/right drive scale
+compensation around the classical skid-steer cmd_vel baseline. Suspension
+posture is held by Isaac env targets and by the v2 trajectory controller in
+Gazebo.
 """
 
 from isaaclab.utils import configclass

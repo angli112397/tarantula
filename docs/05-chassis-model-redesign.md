@@ -19,58 +19,70 @@
 
 ## 本轮决策
 
-1. 轮胎视觉仍为圆柱，碰撞默认使用球形，并支持圆柱 A/B：
-   - 文件：`tarantula_chassis.xacro`
-   - launch 参数：`wheel_collision:=sphere|cylinder`
-   - 原因：圆柱轮在台阶边缘和侧向擦碰时接触不连续，Gazebo/Isaac 更容易产生尖峰力。
-   - 取舍：球形轮会弱化轮胎侧壁和宽度效应；如需轮胎宽度，再测试 capsule / 多球近似。
+1. 当前 baseline model 固定为 v2：
+   - 文件：`tarantula_v2.urdf.xacro`、`tarantula_core_v2.urdf.xacro`、
+     `tarantula_chassis_v2.xacro`、`tarantula_common.xacro`;
+   - launch 参数：`robot_model:=tarantula_v2.urdf.xacro`;
+   - 六条腿是单自由度髋关节/摆臂，轮子直接安装在摆臂末端；
+   - 不再使用被动 rocker、虚拟弹簧滑柱或 wheel-end 被动悬挂；
+   - 不再保留旧模型或 fixed-hip 诊断分支。
 
-2. 底盘腹部 collision 显式命名并略收腹：
+2. 轮胎视觉和碰撞 baseline 都使用圆柱：
+   - launch 参数：`wheel_collision:=cylinder`;
+   - 原因：当前 Gazebo GUI 已验证 cylinder 在 v2 baseline 上具备稳定直行和完美原地转向；
+   - `sphere` 保留为崎岖地形接触 A/B，不作为默认运动学验收模型。
+
+3. 底盘腹部 collision 显式命名并略收腹：
    - `base_belly_collision`
    - 原因：粗糙地形任务应明确建模托底风险，而不是让视觉外壳或装饰件参与接触。
 
-3. base COM 显式参数化：
+4. base COM 显式参数化：
    - `body_com_x/y/z`
    - 原因：后续 Isaac/Gazebo 都可以围绕 COM 做域随机化和载荷敏感性测试。
 
-4. 删除几何 contact sensor 作为控制/观测来源：
+5. 删除几何 contact sensor 作为控制/观测来源：
    - 不再发布 `/contact/{leg}` 或 `/contact/base`；
-   - 策略观测统一为轮轴 F/T 推出的连续 `wheel_load(6)`；
+   - 策略观测统一为轮轴 F/T 推出的连续 `wheel_force_b(18)`；
    - 原因：真实系统中几何接触真值难以实现，轮轴/轮毂 F/T 更接近论文中的
      force-torque measurement。
 
-5. 删除 Gazebo-only 髋关节虚拟弹簧：
+6. 删除 Gazebo-only 髋关节虚拟弹簧：
    - 不再写 `<springStiffness>` / `<implicitSpringDamper>`；
-   - Gazebo RL 部署由 `rl_suspension_policy.py` 显式计算
-     `tau = kp(target-q) - kd*qdot`，并按 URDF effort limit 限幅；
-   - Isaac 使用同参数 joint position drive，角色是执行器模型，不是免费被动弹簧。
+   - Gazebo v2 hip 使用 `joint_trajectory_controller/JointTrajectoryController`；
+   - 控制入口是 `/suspension_controller/joint_trajectory`，目标角度从当前自然姿态初始化；
+   - Stage A RL 不直接输出 hip 命令；hip RL 留到后续 Ring 5。
 
-6. Isaac USD 缓存文件名：
-   - `tarantula_core_baseline_pd_sphere_wheels.usd`
+7. Isaac USD 缓存：
+   - 当前基线：`tarantula_v2_actuated_cylinder_wheels.usd`
+   - `/tmp/tarantula_v2.urdf` 和 `/tmp/tarantula_usd/*.usd` 由源文件 hash
+     控制重生，URDF/执行器参数变化后不得复用旧模型。
 
-7. reward 方向同步：
+8. reward 方向同步：
    - baseline reward 只保留速度跟踪、yaw-rate 跟踪、姿态、动作平滑、
      关节软限位和终止惩罚；
-   - `wheel_load(6)` 先作为观测和诊断指标，不进入 baseline reward。
+   - `wheel_force_b(18)` 先作为观测和诊断指标，不进入 baseline reward。
 
-8. Gazebo 物理验收增加独立站姿保持层：
-   - `stand_suspension_hold` 只做 6 个悬挂关节的限幅 PD stand hold；
-   - wheel open-loop benchmark 只发布轮速，不发布悬挂力矩；
-   - 原因：删除 Gazebo-only 髋关节弹簧后，`active_suspension` 是姿态调平器，
-     不是从趴地状态建立站姿的支撑控制器。物理接触验收必须先建立稳定站姿。
+9. Gazebo 物理验收使用 v2 直接验收脚本：
+   - `scripts/gazebo_chassis_pose_diffdrive_test.py --profile turn-only`;
+   - `scripts/gazebo_chassis_pose_diffdrive_test.py --profile posture-only`;
+   - 脚本使用当前自然 hip 姿态作为 `initial`，测试结束回到该姿态；
+   - 旧 effort hold、wheel contact lab 和 fixed-hip 诊断路径已删除，不作为当前 baseline gate。
 
-9. RL Stage A 改为 wheel-only：
-   - Isaac 中悬挂固定在 neutral stand target；
-   - Gazebo 中悬挂由 `stand_suspension_hold` 控制；
-   - actor action 只输出 6 路轮速，先验证 `cmd_vx/cmd_wz` obedience；
-   - 悬挂 RL 留到 Stage B，以 stand target residual 的形式重新设计。
+10. RL Stage A 为结构化轮速补偿：
+   - Gazebo 中 hip 由 trajectory controller 维持自然/指定姿态；
+   - 传统 skid-steer controller 负责 `/cmd_vel -> wheel_target`；
+   - actor action 只输出 3 路结构化补偿：
+     `track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`；
+   - 最终轮速限幅从 actor `.npz` metadata 读取；
+   - 先验证 `cmd_vx/cmd_wz` obedience；
+   - 悬挂/姿态 RL 留到后续 ring，以 hip target residual 的形式重新设计。
 
 ## 后续验证
 
 - Gazebo：RL low-speed flat / single bump / side step / rough terrain 行为。
-- Gazebo physics baseline：`stand_hold:=true` 下跑 `gazebo_wheel_open_loop_benchmark.py`。
+- Gazebo physics baseline：v2 GUI + `gazebo_chassis_pose_diffdrive_test.py`。
 - Wheel collision A/B：只切换 `wheel_collision:=sphere|cylinder`，其他 launch
-  参数、地形、stand-hold 参数和 benchmark 序列保持一致。
+  参数、地形、hip profile 和 benchmark 序列保持一致。
 - Isaac：重新生成 USD 后检查 obs/action 无 NaN。
 - 对齐项：轮速响应、轮端力分布、同一地形的 roll/pitch RMS、关节力矩饱和率。
 
@@ -88,7 +100,7 @@
 
 - wheel radius: `0.12 -> 0.13 m`
   - 目的：提高台阶/碎石通过裕度，降低球形 collision 在小障碍上的卡滞概率。
-  - 同步：`controllers.yaml`、`rl_suspension_policy.py`、`suspension_env_cfg.py`。
+  - 同步：`controllers_v2_position.yaml`、`motion_control_node.py`、`suspension_env_cfg.py`。
 - wheel width/mass: `0.07 -> 0.075 m`, `1.5 -> 1.7 kg`
   - 目的：让轮子视觉和惯量更接近越障轮，不让轮端过轻导致接触尖峰过敏。
 - body COM z: `0.0 -> -0.025 m`

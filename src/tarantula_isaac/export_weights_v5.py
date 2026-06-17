@@ -13,11 +13,28 @@ import sys
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--npz-out", required=True, help="Path to write raw actor weights as .npz.")
+parser.add_argument("--max-abs-wheel-omega", type=float, default=None)
 args = parser.parse_args()
 
 # Isaac Lab imports NOT needed -- torch only
 import torch
 import numpy as np
+
+
+def _read_env_yaml_float(checkpoint_path: pathlib.Path, key: str) -> float | None:
+    env_yaml = checkpoint_path.parent / "params" / "env.yaml"
+    if not env_yaml.exists():
+        return None
+    prefix = f"{key}:"
+    for raw_line in env_yaml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line.startswith(prefix):
+            continue
+        try:
+            return float(line.split(":", 1)[1].strip())
+        except ValueError:
+            return None
+    return None
 
 ckpt_path = pathlib.Path(args.checkpoint)
 print(f"[export] Loading checkpoint: {ckpt_path}")
@@ -107,16 +124,25 @@ if norm_mean is None:
 
 npz_data["obs_normalizer._mean"] = norm_mean.astype(np.float32)
 npz_data["obs_normalizer._std"]  = norm_std.astype(np.float32)
+max_wheel = (
+    args.max_abs_wheel_omega
+    if args.max_abs_wheel_omega is not None
+    else _read_env_yaml_float(ckpt_path, "max_abs_wheel_omega")
+)
+if max_wheel is None:
+    max_wheel = 6.0
+npz_data["max_abs_wheel_omega"] = np.asarray([max_wheel], dtype=np.float32)
 
 # Validate shapes
 print(f"[export] MLP shapes:")
-print(f"  mlp.0.weight: {npz_data['mlp.0.weight'].shape}  (expect [128,41] wheel-only or [128,47] legacy)")
+print(f"  mlp.0.weight: {npz_data['mlp.0.weight'].shape}  (expect [128,47])")
 print(f"  mlp.0.bias:   {npz_data['mlp.0.bias'].shape}    (expect [128])")
 print(f"  mlp.2.weight: {npz_data['mlp.2.weight'].shape}  (expect [128,128])")
-print(f"  mlp.4.weight: {npz_data['mlp.4.weight'].shape}  (expect [6,128] wheel-only or [12,128] legacy)")
+print(f"  mlp.4.weight: {npz_data['mlp.4.weight'].shape}  (expect [3,128])")
 print(f"  obs mean:     {npz_data['obs_normalizer._mean'].shape}  (expect [{obs_dim}])")
-assert obs_dim in (41, 47), f"Expected obs dim 41 or 47, got {obs_dim}"
-assert action_dim in (6, 12), f"Expected action dim 6 or 12, got {action_dim}"
+print(f"  wheel clamp:  {float(npz_data['max_abs_wheel_omega'][0])} rad/s")
+assert obs_dim == 47, f"Expected current Stage A obs dim 47, got {obs_dim}"
+assert action_dim == 3, f"Expected current Stage A action dim 3, got {action_dim}"
 assert npz_data["mlp.0.weight"].shape == (128, obs_dim), f"Expected (128,{obs_dim}), got {npz_data['mlp.0.weight'].shape}"
 assert npz_data["mlp.4.weight"].shape == (action_dim, 128), f"Expected ({action_dim},128), got {npz_data['mlp.4.weight'].shape}"
 assert npz_data["obs_normalizer._mean"].shape == (obs_dim,), f"Expected ({obs_dim},), got {npz_data['obs_normalizer._mean'].shape}"
@@ -125,4 +151,4 @@ npz_path = pathlib.Path(args.npz_out)
 npz_path.parent.mkdir(parents=True, exist_ok=True)
 np.savez_compressed(npz_path, **npz_data)
 print(f"[export] Raw npz written to: {npz_path}")
-print("[export] DONE — v5 weights exported.")
+print("[export] DONE - v5 structured-compensation weights exported.")

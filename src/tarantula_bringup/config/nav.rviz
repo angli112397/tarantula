@@ -67,7 +67,7 @@ Visualization Manager:
       Name: Odometry
       Enabled: false
       Topic:
-        Value: /diff_drive_controller/odom
+        Value: /tarantula/truth_odom
       Keep: 200
   Tools:
     - Class: rviz_default_plugins/MoveCamera

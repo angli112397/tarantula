@@ -43,19 +43,36 @@ def origins_from_metadata(
     num_envs: int,
     spawn_z: float,
     spawn_xy_margin: float | None = None,
+    min_level: int | None = None,
+    max_level: int | None = None,
 ) -> np.ndarray:
     """Return Isaac Lab terrain origins from generated terrain metadata."""
     origins = metadata.get("env_origins") or []
     if origins:
-        rows = int(metadata["num_rows"])
+        source_rows = int(metadata["num_rows"])
         cols = int(metadata["num_cols"])
-        origin_grid = np.zeros((rows, cols, 3), dtype=np.float32)
+        lo = 0 if min_level is None else max(0, int(min_level))
+        hi = source_rows - 1 if max_level is None else min(source_rows - 1, int(max_level))
+        if lo > hi:
+            raise ValueError(f"invalid terrain level range: min_level={lo}, max_level={hi}")
+        selected_rows = hi - lo + 1
+        origin_grid = np.zeros((selected_rows, cols, 3), dtype=np.float32)
+        found = np.zeros((selected_rows, cols), dtype=bool)
         for origin in origins:
             row = int(origin["row"])
+            if row < lo or row > hi:
+                continue
             col = int(origin["col"])
             xyz = origin["xyz"]
-            origin_grid[row, col] = [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+            origin_grid[row - lo, col] = [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+            found[row - lo, col] = True
+        if not bool(found.all()):
+            missing = np.argwhere(~found)
+            raise ValueError(f"metadata env_origins missing selected terrain cells: {missing.tolist()}")
         return origin_grid
+
+    if min_level is not None or max_level is not None:
+        raise ValueError("terrain level filtering requires metadata env_origins")
 
     size_x = float(metadata["size_x"])
     size_y = float(metadata["size_y"])

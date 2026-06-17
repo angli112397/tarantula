@@ -31,6 +31,8 @@ class SharedHeightmapTerrainImporterCfg(TerrainImporterCfg):
     metadata_path: str = str(DEFAULT_TERRAIN_DIR / "metadata.json")
     spawn_z: float = 0.20
     spawn_xy_margin: float = 5.0
+    min_level: int | None = None
+    max_level: int | None = None
 
 
 class SharedHeightmapTerrainImporter(TerrainImporter):
@@ -63,7 +65,14 @@ class SharedHeightmapTerrainImporter(TerrainImporter):
         mesh = heightmap_to_trimesh(height, resolution)
         self.import_mesh("terrain", mesh)
 
-        origins = origins_from_metadata(metadata, cfg.num_envs, cfg.spawn_z, cfg.spawn_xy_margin)
+        origins = origins_from_metadata(
+            metadata,
+            cfg.num_envs,
+            cfg.spawn_z,
+            cfg.spawn_xy_margin,
+            min_level=cfg.min_level,
+            max_level=cfg.max_level,
+        )
         origins = lift_origins_to_heightmap(origins, height, metadata, cfg.spawn_z)
         self.configure_env_origins(origins)
         self.set_debug_vis(cfg.debug_vis)
@@ -77,13 +86,22 @@ def make_shared_heightmap_terrain_cfg(
     *,
     prim_path: str = "/World/ground",
     debug_vis: bool = False,
+    min_level: int | None = None,
+    max_level: int | None = None,
 ) -> SharedHeightmapTerrainImporterCfg:
     terrain_dir = Path(terrain_dir)
+    init_level = 1
+    if min_level is not None or max_level is not None:
+        metadata = json.loads((terrain_dir / "metadata.json").read_text(encoding="utf-8"))
+        rows = int(metadata["num_rows"])
+        lo = 0 if min_level is None else max(0, int(min_level))
+        hi = rows - 1 if max_level is None else min(rows - 1, int(max_level))
+        init_level = max(0, hi - lo)
     cfg = SharedHeightmapTerrainImporterCfg(
         prim_path=prim_path,
         height_path=str(terrain_dir / "height.npy"),
         metadata_path=str(terrain_dir / "metadata.json"),
-        max_init_terrain_level=1,
+        max_init_terrain_level=init_level,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -92,6 +110,8 @@ def make_shared_heightmap_terrain_cfg(
             dynamic_friction=1.0,
         ),
         debug_vis=debug_vis,
+        min_level=min_level,
+        max_level=max_level,
     )
     cfg.class_type = SharedHeightmapTerrainImporter
     return cfg

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Isaac Lab headless regression check: chassis settles with wheels on the
 # ground (SPAWN_Z_OFFSET matches the chassis URDF) and drives at cmd_vel.
-# Rerun this after any tarantula_chassis.xacro / robot.py change.
+# Rerun this after any tarantula_chassis_v2.xacro, tarantula_common.xacro, or robot.py change.
 set -uo pipefail
 source ~/isaac_venv/bin/activate
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

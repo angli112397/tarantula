@@ -15,16 +15,13 @@ setup(
     zip_safe=True,
     maintainer='ang',
     maintainer_email='angli23@yahoo.com',
-    description='Active suspension controller for the Tarantula six-wheel chassis',
+    description='Control and diagnostic nodes for the Tarantula six-wheel chassis',
     license='MIT',
     entry_points={
         'console_scripts': [
-            'active_suspension = tarantula_control.active_suspension:main',
-            'cmd_vel_wheel_baseline = tarantula_control.cmd_vel_wheel_baseline:main',
             'gazebo_truth_odometry = tarantula_control.gazebo_truth_odometry:main',
-            'rl_suspension_policy = tarantula_control.rl_suspension_policy:main',
+            'motion_control_node = tarantula_control.motion_control_node:main',
             'scan_gate = tarantula_control.scan_gate:main',
-            'stand_suspension_hold = tarantula_control.stand_suspension_hold:main',
         ],
     },
 )

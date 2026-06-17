@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             RegisterEventHandler)
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import AndSubstitution, NotSubstitution, OrSubstitution
+from launch.substitutions import AndSubstitution
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
@@ -27,7 +27,9 @@ def generate_launch_description():
     robot_description = ParameterValue(
         Command([
             'xacro ',
-            os.path.join(description_dir, 'urdf', 'tarantula.urdf.xacro'),
+            os.path.join(description_dir, 'urdf'),
+            '/',
+            LaunchConfiguration('robot_model'),
             ' wheel_collision:=',
             LaunchConfiguration('wheel_collision'),
         ]),
@@ -103,76 +105,18 @@ def generate_launch_description():
         arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
         output='screen')
 
-    per_wheel_mode = OrSubstitution(
-        LaunchConfiguration('rl_policy'),
-        LaunchConfiguration('manual_wheel'))
-
-    # Classical path: diff_drive_controller (grouped L/R, publishes /odom)
-    diff_drive = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['diff_drive_controller', '--controller-manager', '/controller_manager'],
-        condition=UnlessCondition(per_wheel_mode),
-        output='screen')
-
-    # Per-wheel path: manual_wheel baseline or RL, both replace diff_drive.
+    # Per-wheel path: classical motion control with optional RL compensation.
     wheel_velocity_ctrl = Node(
         package='controller_manager',
         executable='spawner',
         arguments=['wheel_velocity_controller', '--controller-manager', '/controller_manager'],
-        condition=IfCondition(per_wheel_mode),
+        condition=IfCondition(LaunchConfiguration('motion_control')),
         output='screen')
 
     suspension = Node(
         package='controller_manager',
         executable='spawner',
         arguments=['suspension_controller', '--controller-manager', '/controller_manager'],
-        output='screen')
-
-    # RL path: active_suspension must NOT run when rl_policy:=true (rl_suspension_policy
-    # publishes torques directly to /suspension_controller/commands; running both
-    # would cause conflicting torque commands on the same topic).
-    active_suspension = Node(
-        package='tarantula_control',
-        executable='active_suspension',
-        parameters=[{'use_sim_time': True}],
-        condition=IfCondition(AndSubstitution(
-            LaunchConfiguration('leveling'),
-            AndSubstitution(
-                NotSubstitution(LaunchConfiguration('stand_hold')),
-                OrSubstitution(
-                    NotSubstitution(LaunchConfiguration('rl_policy')),
-                    LaunchConfiguration('start_active_suspension'))))),
-        output='screen')
-
-    stand_suspension_hold = Node(
-        package='tarantula_control',
-        executable='stand_suspension_hold',
-        parameters=[{
-            'use_sim_time': True,
-            'target': ParameterValue(LaunchConfiguration('stand_target'), value_type=float),
-            'kp': ParameterValue(LaunchConfiguration('stand_kp'), value_type=float),
-            'kd': ParameterValue(LaunchConfiguration('stand_kd'), value_type=float),
-            'effort_limit': ParameterValue(LaunchConfiguration('stand_effort_limit'), value_type=float),
-            'target_ramp_rate': ParameterValue(LaunchConfiguration('stand_ramp_rate'), value_type=float),
-        }],
-        condition=IfCondition(LaunchConfiguration('stand_hold')),
-        output='screen')
-
-    cmd_vel_wheel_baseline = Node(
-        package='tarantula_control',
-        executable='cmd_vel_wheel_baseline',
-        parameters=[{
-            'use_sim_time': True,
-            'cmd_vx': ParameterValue(LaunchConfiguration('cmd_vx'), value_type=float),
-            'cmd_wz': ParameterValue(LaunchConfiguration('cmd_wz'), value_type=float),
-            'max_abs_cmd_vx': ParameterValue(LaunchConfiguration('max_abs_cmd_vx'), value_type=float),
-            'max_abs_cmd_wz': ParameterValue(LaunchConfiguration('max_abs_cmd_wz'), value_type=float),
-            'max_abs_wheel_omega': ParameterValue(LaunchConfiguration('max_abs_wheel_omega'), value_type=float),
-        }],
-        condition=IfCondition(AndSubstitution(
-            LaunchConfiguration('manual_wheel'),
-            NotSubstitution(LaunchConfiguration('rl_policy')))),
         output='screen')
 
     gazebo_truth_odometry = Node(
@@ -185,33 +129,40 @@ def generate_launch_description():
             'rate': ParameterValue(LaunchConfiguration('truth_odom_rate'), value_type=float),
         }],
         condition=IfCondition(AndSubstitution(
-            LaunchConfiguration('rl_policy'),
+            LaunchConfiguration('motion_control'),
             LaunchConfiguration('truth_odom'))),
         output='screen')
 
-    # M7 v5：RL 悬挂+独立轮速策略（PPO actor，src/tarantula_isaac 训练）。
-    # v5 直接向 /suspension_controller/commands 发关节力矩，并向
-    # /wheel_velocity_controller/commands 发 6 路轮速（绕过
-    # active_suspension），active_suspension 在 rl_policy:=true 时不启动。
-    # cmd_vx/cmd_wz 是 cmd_vel-style 指令接口；节点同时订阅 /cmd_vel，
-    # launch 参数只作为没有上层导航/遥控输入时的默认指令。
-    rl_suspension_policy = Node(
+    # Motion deployment node: classical skid-steer wheel targets with optional
+    # bounded RL structured compensation. Stage A does not command hip posture;
+    # v2 posture is owned by the trajectory controller or an explicit test/profile node.
+    # cmd_vx/cmd_wz are cmd_vel-style fallback defaults; /cmd_vel overrides them.
+    motion_control_node = Node(
         package='tarantula_control',
-        executable='rl_suspension_policy',
+        executable='motion_control_node',
         parameters=[{
             'use_sim_time': True,
             'cmd_vx': ParameterValue(LaunchConfiguration('cmd_vx'), value_type=float),
             'cmd_wz': ParameterValue(LaunchConfiguration('cmd_wz'), value_type=float),
             'max_abs_cmd_vx': ParameterValue(LaunchConfiguration('max_abs_cmd_vx'), value_type=float),
             'max_abs_cmd_wz': ParameterValue(LaunchConfiguration('max_abs_cmd_wz'), value_type=float),
+            'arc_track_scale': ParameterValue(LaunchConfiguration('arc_track_scale'), value_type=float),
+            'pure_turn_track_scale': ParameterValue(LaunchConfiguration('pure_turn_track_scale'), value_type=float),
+            'track_scale_transition_vx': ParameterValue(LaunchConfiguration('track_scale_transition_vx'), value_type=float),
+            'track_scale_delta_limit': ParameterValue(LaunchConfiguration('track_scale_delta_limit'), value_type=float),
+            'drive_scale_delta_limit': ParameterValue(LaunchConfiguration('drive_scale_delta_limit'), value_type=float),
+            'yaw_rate_kp': ParameterValue(LaunchConfiguration('yaw_rate_kp'), value_type=float),
+            'yaw_rate_ki': ParameterValue(LaunchConfiguration('yaw_rate_ki'), value_type=float),
+            'yaw_integral_limit': ParameterValue(LaunchConfiguration('yaw_integral_limit'), value_type=float),
+            'max_wheel_accel': ParameterValue(LaunchConfiguration('max_wheel_accel'), value_type=float),
+            'pure_turn_forward_bias': ParameterValue(LaunchConfiguration('pure_turn_forward_bias'), value_type=float),
+            'pure_turn_vx_deadband': ParameterValue(LaunchConfiguration('pure_turn_vx_deadband'), value_type=float),
             'policy_weights_npz': LaunchConfiguration('policy_weights_npz'),
-            'policy_mode': LaunchConfiguration('rl_policy_mode'),
-            'velocity_source': LaunchConfiguration('velocity_source'),
-            'truth_odom_topic': LaunchConfiguration('truth_odom_topic'),
+            'rl_compensation_enabled': ParameterValue(LaunchConfiguration('rl_compensation_enabled'), value_type=bool),
         }],
         condition=IfCondition(AndSubstitution(
-            LaunchConfiguration('rl_policy'),
-            LaunchConfiguration('start_rl_policy'))),
+            LaunchConfiguration('motion_control'),
+            LaunchConfiguration('start_motion_control'))),
         output='screen')
 
     return LaunchDescription([
@@ -219,51 +170,53 @@ def generate_launch_description():
                               description='false 时无图形界面运行（headless）'),
         DeclareLaunchArgument('spawn_x', default_value='0.0'),
         DeclareLaunchArgument('spawn_y', default_value='0.0'),
-        DeclareLaunchArgument('spawn_z', default_value='0.38'),
-        DeclareLaunchArgument('leveling', default_value='true',
-                              description='false 时不启动主动调平（纯被动悬挂对照）'),
-        DeclareLaunchArgument('rl_policy', default_value='false',
-                              description='true 时启动 M7 v5 RL 策略节点（每关节力矩 + 每轮速度）'),
-        DeclareLaunchArgument('manual_wheel', default_value='false',
-                              description='true 时启动 /cmd_vel -> per-wheel 轮速 baseline，使用与 RL 相同的 wheel_velocity_controller'),
-        DeclareLaunchArgument('start_rl_policy', default_value='true',
-                              description='rl_policy:=true 时是否启动 RL 节点；false 可只启动独立轮速/悬挂控制器用于开环物理测试'),
-        DeclareLaunchArgument('start_active_suspension', default_value='false',
-                              description='rl_policy:=true 时允许启动 active_suspension；用于轮速开环、悬挂经典调平的物理测试'),
-        DeclareLaunchArgument('stand_hold', default_value='false',
-                              description='true 时启动独立站姿保持节点，直接 PD 保持悬挂关节目标；与 active_suspension/RL 悬挂输出互斥使用'),
-        DeclareLaunchArgument('stand_target', default_value='0.0',
-                              description='stand_hold 悬挂关节目标 rad'),
-        DeclareLaunchArgument('stand_kp', default_value='95.0',
-                              description='stand_hold 悬挂关节 PD kp Nm/rad'),
-        DeclareLaunchArgument('stand_kd', default_value='18.0',
-                              description='stand_hold 悬挂关节 PD kd Nms/rad'),
-        DeclareLaunchArgument('stand_effort_limit', default_value='45.0',
-                              description='stand_hold 单关节力矩限幅 Nm'),
-        DeclareLaunchArgument('stand_ramp_rate', default_value='0.18',
-                              description='stand_hold 目标角 ramp rate rad/s'),
-        DeclareLaunchArgument('wheel_collision', default_value='sphere',
+        DeclareLaunchArgument('spawn_z', default_value='0.55'),
+        DeclareLaunchArgument('motion_control', default_value='true',
+                              description='true 时启动 /cmd_vel -> per-wheel 传统主控，可选叠加 RL structured compensation'),
+        DeclareLaunchArgument('start_motion_control', default_value='true',
+                              description='motion_control:=true 时是否启动 motion_control_node；false 可只启动独立轮速/悬挂控制器用于开环物理测试'),
+        DeclareLaunchArgument('wheel_collision', default_value='cylinder',
                               description='轮胎 collision 几何：sphere 或 cylinder；用于 Gazebo/Isaac 物理 A/B'),
-        DeclareLaunchArgument('cmd_vx', default_value='0.2',
-                              description='RL/manual_wheel 默认前向速度 m/s；/cmd_vel 会覆盖该值'),
+        DeclareLaunchArgument('robot_model', default_value='tarantula_v2.urdf.xacro',
+                              description='robot xacro model under tarantula_description/urdf; current baseline is tarantula_v2.urdf.xacro'),
+        DeclareLaunchArgument('cmd_vx', default_value='0.1',
+                              description='motion_control 默认前向速度 m/s；/cmd_vel 会覆盖该值'),
         DeclareLaunchArgument('cmd_wz', default_value='0.0',
-                              description='RL/manual_wheel 默认 yaw rate rad/s；/cmd_vel 会覆盖该值'),
+                              description='motion_control 默认 yaw rate rad/s；/cmd_vel 会覆盖该值'),
         DeclareLaunchArgument('max_abs_cmd_vx', default_value='0.3',
-                              description='RL/manual_wheel cmd_vx 限幅 m/s'),
+                              description='motion_control cmd_vx 限幅 m/s'),
         DeclareLaunchArgument('max_abs_cmd_wz', default_value='0.4',
-                              description='RL/manual_wheel cmd_wz 限幅 rad/s'),
-        DeclareLaunchArgument('max_abs_wheel_omega', default_value='3.0',
-                              description='manual_wheel 单轮速度限幅 rad/s'),
+                              description='motion_control cmd_wz 限幅 rad/s'),
+        DeclareLaunchArgument('arc_track_scale', default_value='1.0',
+                              description='行进弧线时的 skid-steer effective track scale'),
+        DeclareLaunchArgument('pure_turn_track_scale', default_value='3.0',
+                              description='纯转向/低线速度时的 skid-steer effective track scale'),
+        DeclareLaunchArgument('track_scale_transition_vx', default_value='0.08',
+                              description='track scale 从纯转向向弧线行驶过渡的 |cmd_vx| 阈值 m/s'),
+        DeclareLaunchArgument('track_scale_delta_limit', default_value='0.3',
+                              description='RL 可调 effective track scale 的最大比例补偿'),
+        DeclareLaunchArgument('drive_scale_delta_limit', default_value='0.2',
+                              description='RL 可调 left/right drive scale 的最大比例补偿'),
+        DeclareLaunchArgument('yaw_rate_kp', default_value='2.0',
+                              description='yaw-rate 闭环 P 增益，单位约为 wheel rad/s per yaw rad/s'),
+        DeclareLaunchArgument('yaw_rate_ki', default_value='0.0',
+                              description='yaw-rate 闭环 I 增益；默认关闭'),
+        DeclareLaunchArgument('yaw_integral_limit', default_value='0.8',
+                              description='yaw-rate 积分误差限幅 rad'),
+        DeclareLaunchArgument('max_wheel_accel', default_value='12.0',
+                              description='motion_control wheel target slew limit rad/s^2；<=0 关闭'),
+        DeclareLaunchArgument('pure_turn_forward_bias', default_value='0.0',
+                              description='纯转向时用于抵消 Gazebo 接触倒车漂移的最大前向补偿 m/s'),
+        DeclareLaunchArgument('pure_turn_vx_deadband', default_value='0.03',
+                              description='|cmd_vx| 小于该值时才启用 pure_turn_forward_bias'),
         DeclareLaunchArgument('policy_weights_npz', default_value='',
-                              description='RL actor .npz 权重路径；rl_policy:=true 时必须显式提供'),
-        DeclareLaunchArgument('rl_policy_mode', default_value='auto',
-                              description='auto/wheel_only/suspension_wheel；Stage A 使用 wheel_only 防止与 stand_hold 冲突'),
-        DeclareLaunchArgument('velocity_source', default_value='auto',
-                              description='RL 速度观测来源：auto/truth_odom/wheel；Gazebo 验证默认 auto 使用 truth_odom'),
+                              description='RL actor .npz 权重路径；rl_compensation_enabled:=true 时必须显式提供'),
+        DeclareLaunchArgument('rl_compensation_enabled', default_value='false',
+                              description='true 时在传统 skid-steer wheel target 上叠加 RL structured compensation；false 时只跑传统运动控制'),
         DeclareLaunchArgument('truth_odom', default_value='false',
-                              description='rl_policy:=true 时可启动 Gazebo truth odometry 诊断适配节点；默认关闭以避免 CLI 采样拖慢 GUI'),
+                              description='仅启动 Gazebo truth odometry 诊断/benchmark 节点；不进入 motion_control 算法'),
         DeclareLaunchArgument('truth_odom_topic', default_value='/tarantula/truth_odom',
-                              description='Gazebo truth odometry topic for RL deployment observation'),
+                              description='Gazebo truth odometry 诊断 topic'),
         DeclareLaunchArgument('truth_odom_rate', default_value='5.0',
                               description='Gazebo truth odometry publish rate Hz'),
         DeclareLaunchArgument('world', default_value=default_generated_world,
@@ -274,19 +227,13 @@ def generate_launch_description():
         robot_state_publisher,
         lidar_frame_bridge,
         spawn_robot,
-        # 串行启动控制器：spawn 完成 -> jsb -> 两个控制器 -> 避震节点
+        # 串行启动控制器：spawn 完成 -> jsb -> wheel/suspension controllers -> control/diagnostic nodes.
         RegisterEventHandler(OnProcessExit(
             target_action=spawn_robot, on_exit=[joint_state_broadcaster])),
         RegisterEventHandler(OnProcessExit(
-            target_action=joint_state_broadcaster, on_exit=[diff_drive, wheel_velocity_ctrl, suspension])),
-        RegisterEventHandler(OnProcessExit(
-            target_action=joint_state_broadcaster, on_exit=[active_suspension])),
-        RegisterEventHandler(OnProcessExit(
-            target_action=joint_state_broadcaster, on_exit=[stand_suspension_hold])),
-        RegisterEventHandler(OnProcessExit(
-            target_action=joint_state_broadcaster, on_exit=[cmd_vel_wheel_baseline])),
+            target_action=joint_state_broadcaster, on_exit=[wheel_velocity_ctrl, suspension])),
         RegisterEventHandler(OnProcessExit(
             target_action=joint_state_broadcaster, on_exit=[gazebo_truth_odometry])),
         RegisterEventHandler(OnProcessExit(
-            target_action=joint_state_broadcaster, on_exit=[rl_suspension_policy])),
+            target_action=joint_state_broadcaster, on_exit=[motion_control_node])),
     ])

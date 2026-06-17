@@ -1,0 +1,47 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 200
+    use_sim_time: true
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    suspension_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    wheel_velocity_controller:
+      type: velocity_controllers/JointGroupVelocityController
+
+suspension_controller:
+  ros__parameters:
+    use_sim_time: true
+    joints:
+      - susp_fl_joint
+      - susp_fr_joint
+      - susp_ml_joint
+      - susp_mr_joint
+      - susp_rl_joint
+      - susp_rr_joint
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    open_loop_control: true
+    allow_partial_joints_goal: false
+    state_publish_rate: 50.0
+    action_monitor_rate: 20.0
+    constraints:
+      stopped_velocity_tolerance: 0.05
+      goal_time: 0.0
+
+wheel_velocity_controller:
+  ros__parameters:
+    use_sim_time: true
+    joints:
+      - wheel_fl_joint
+      - wheel_fr_joint
+      - wheel_ml_joint
+      - wheel_mr_joint
+      - wheel_rl_joint
+      - wheel_rr_joint

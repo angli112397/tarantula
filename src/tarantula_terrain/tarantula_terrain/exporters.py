@@ -83,7 +83,7 @@ def export_terrain_sdf(out_dir: Path, obj_path: Path) -> Path:
           <mesh><uri>{mesh_uri}</uri></mesh>
         </geometry>
         <surface>
-          <friction><ode><mu>1.10</mu><mu2>1.00</mu2></ode></friction>
+          <friction><ode><mu>1.50</mu><mu2>1.50</mu2></ode></friction>
         </surface>
       </collision>
       <visual name="terrain_visual">

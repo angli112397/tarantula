@@ -1,19 +1,8 @@
 <?xml version="1.0"?>
-<!-- ============================================================
-     Gazebo Ignition (gz-sim) 适配层：include 本体（tarantula_core）后叠加
-     仿真器专属内容——轮胎接触参数、力/力矩传感器、
-     ros2_control（经 gz_ros2_control）。本体改动一律改
-     tarantula_core.urdf.xacro，此文件只关心 Gazebo 的事。
-     ============================================================ -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
+  <xacro:include filename="$(find tarantula_description)/urdf/tarantula_core_v2.urdf.xacro"/>
 
-  <xacro:include filename="$(find tarantula_description)/urdf/tarantula_core.urdf.xacro"/>
-
-  <!-- ============ 每腿 Gazebo 标签 ============ -->
   <xacro:macro name="leg_gazebo" params="prefix">
-
-    <!-- 髋关节力/力矩传感器：child(摆臂)对parent(车身)的反作用力。
-         只做诊断/系统辨识，不作为部署策略的必需接触真值。 -->
     <gazebo reference="susp_${prefix}_joint">
       <sensor name="ft_${prefix}" type="force_torque">
         <update_rate>50</update_rate>
@@ -24,17 +13,15 @@
         </force_torque>
       </sensor>
     </gazebo>
-
-    <!-- 轮胎接触参数 -->
     <gazebo reference="wheel_${prefix}_link">
       <mu1>1.35</mu1>
-      <mu2>1.05</mu2>
+      <mu2>0.45</mu2>
+      <fdir1>1 0 0</fdir1>
+      <slip1>0.0</slip1>
+      <slip2>0.08</slip2>
       <kp>1000000.0</kp>
       <kd>140.0</kd>
     </gazebo>
-
-    <!-- 轮轴力/力矩传感器：部署可实现的轮载观测来源（轮毂/轮轴 F/T）。
-         RL 不使用几何 contact boolean；轮载由 ||F|| 或法向力连续估计。 -->
     <gazebo reference="wheel_${prefix}_joint">
       <sensor name="ft_wheel_${prefix}" type="force_torque">
         <update_rate>50</update_rate>
@@ -54,18 +41,13 @@
   <xacro:leg_gazebo prefix="rl"/>
   <xacro:leg_gazebo prefix="rr"/>
 
-  <!-- ============ ros2_control ============ -->
   <ros2_control name="GazeboSimSystem" type="system">
-    <hardware>
-      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
-    </hardware>
-
+    <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
     <xacro:macro name="susp_iface" params="prefix">
       <joint name="susp_${prefix}_joint">
-        <command_interface name="effort"/>
+        <command_interface name="position"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
-        <state_interface name="effort"/>
       </joint>
     </xacro:macro>
     <xacro:macro name="wheel_iface" params="prefix">
@@ -76,25 +58,17 @@
       </joint>
     </xacro:macro>
 
-    <xacro:susp_iface prefix="fl"/>
-    <xacro:susp_iface prefix="fr"/>
-    <xacro:susp_iface prefix="ml"/>
-    <xacro:susp_iface prefix="mr"/>
-    <xacro:susp_iface prefix="rl"/>
-    <xacro:susp_iface prefix="rr"/>
-
-    <xacro:wheel_iface prefix="fl"/>
-    <xacro:wheel_iface prefix="fr"/>
-    <xacro:wheel_iface prefix="ml"/>
-    <xacro:wheel_iface prefix="mr"/>
-    <xacro:wheel_iface prefix="rl"/>
-    <xacro:wheel_iface prefix="rr"/>
+    <xacro:susp_iface prefix="fl"/><xacro:susp_iface prefix="fr"/>
+    <xacro:susp_iface prefix="ml"/><xacro:susp_iface prefix="mr"/>
+    <xacro:susp_iface prefix="rl"/><xacro:susp_iface prefix="rr"/>
+    <xacro:wheel_iface prefix="fl"/><xacro:wheel_iface prefix="fr"/>
+    <xacro:wheel_iface prefix="ml"/><xacro:wheel_iface prefix="mr"/>
+    <xacro:wheel_iface prefix="rl"/><xacro:wheel_iface prefix="rr"/>
   </ros2_control>
 
-  <!-- ============ Gazebo 插件 ============ -->
   <gazebo>
     <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-      <parameters>$(find tarantula_bringup)/config/controllers.yaml</parameters>
+      <parameters>$(find tarantula_bringup)/config/controllers_v2_position.yaml</parameters>
     </plugin>
   </gazebo>
 
@@ -119,13 +93,8 @@
             <max_angle>${PI}</max_angle>
           </horizontal>
         </scan>
-        <range>
-          <min>0.20</min>
-          <max>12.0</max>
-          <resolution>0.01</resolution>
-        </range>
+        <range><min>0.20</min><max>12.0</max><resolution>0.01</resolution></range>
       </ray>
     </sensor>
   </gazebo>
-
 </robot>

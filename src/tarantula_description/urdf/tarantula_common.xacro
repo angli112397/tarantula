@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:property name="body_length" value="0.78"/>
+  <xacro:property name="body_width" value="0.36"/>
+  <xacro:property name="body_height" value="0.10"/>
+  <xacro:property name="body_mass" value="18.0"/>
+  <xacro:property name="body_com_x" value="0.0"/>
+  <xacro:property name="body_com_y" value="0.0"/>
+  <xacro:property name="body_com_z" value="-0.025"/>
+
+  <xacro:property name="belly_length" value="0.70"/>
+  <xacro:property name="belly_width" value="0.30"/>
+  <xacro:property name="belly_height" value="0.08"/>
+  <xacro:property name="belly_z" value="0.015"/>
+
+  <xacro:property name="arm_length" value="0.22"/>
+  <xacro:property name="arm_mass" value="0.8"/>
+  <xacro:property name="arm_angle" value="0.698"/>
+
+  <xacro:property name="wheel_radius" value="0.13"/>
+  <xacro:property name="wheel_width" value="0.075"/>
+  <xacro:property name="wheel_mass" value="1.7"/>
+  <xacro:property name="wheel_collision_radius" value="${wheel_radius}"/>
+
+  <xacro:property name="pivot_x" value="0.34"/>
+  <xacro:property name="pivot_mx" value="0.17"/>
+  <xacro:property name="pivot_y" value="0.26"/>
+  <xacro:property name="pivot_z" value="-0.08"/>
+
+  <xacro:property name="deck_standoff" value="0.03"/>
+  <xacro:property name="deck_thick" value="0.012"/>
+
+  <xacro:property name="PI" value="3.14159265"/>
+
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertia ixx="${m/12*(y*y+z*z)}" iyy="${m/12*(x*x+z*z)}" izz="${m/12*(x*x+y*y)}"
+             ixy="0" ixz="0" iyz="0"/>
+  </xacro:macro>
+
+  <xacro:macro name="cylinder_inertia" params="m r h">
+    <inertia ixx="${m/12*(3*r*r+h*h)}" iyy="${m/12*(3*r*r+h*h)}" izz="${m/2*r*r}"
+             ixy="0" ixz="0" iyz="0"/>
+  </xacro:macro>
+
+  <xacro:macro name="deck_post" params="x y">
+    <visual>
+      <origin xyz="${x} ${y} ${body_height/2 + deck_standoff/2}"/>
+      <geometry><cylinder radius="0.012" length="${deck_standoff}"/></geometry>
+      <xacro:mat_tire/>
+    </visual>
+  </xacro:macro>
+
+  <xacro:macro name="mat_body"><material name="m_body"><color rgba="0.18 0.20 0.23 1"/></material></xacro:macro>
+  <xacro:macro name="mat_accent"><material name="m_accent"><color rgba="0.85 0.40 0.05 1"/></material></xacro:macro>
+  <xacro:macro name="mat_tire"><material name="m_tire"><color rgba="0.06 0.06 0.06 1"/></material></xacro:macro>
+  <xacro:macro name="mat_hub"><material name="m_hub"><color rgba="0.65 0.67 0.70 1"/></material></xacro:macro>
+</robot>

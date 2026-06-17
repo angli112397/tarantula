@@ -11,15 +11,14 @@ from launch_ros.actions import Node
 def generate_launch_description():
     """SLAM 在线建图 + Nav2 导航（先 ros2 launch tarantula_bringup sim.launch.py）。
 
-    自建最小 Nav2 bringup 而非 include nav2_bringup：需要把 cmd_vel
-    remap 到 /diff_drive_controller/cmd_vel_unstamped（controller_server
-    和 behavior_server 都直接发速度指令），nav2_bringup 不暴露该 remap，
-    保持机器人侧接口不变、也不引入 relay 节点。
+    自建最小 Nav2 bringup 而非 include nav2_bringup：controller_server
+    和 behavior_server 都直接向机器人标准入口 /cmd_vel 发速度指令，
+    不再经过 diff_drive_controller。
     map->odom 由 slam_toolbox 提供，无 AMCL/map_server。
     """
     bringup_dir = get_package_share_directory('tarantula_bringup')
     params_file = LaunchConfiguration('params_file')
-    cmd_vel_remap = ('cmd_vel', '/diff_drive_controller/cmd_vel_unstamped')
+    cmd_vel_remap = ('cmd_vel', '/cmd_vel')
 
     # 姿态门控扫描过滤：倾斜帧打地的幻影障碍会堵死 costmap（见 scan_gate.py）
     scan_gate = Node(

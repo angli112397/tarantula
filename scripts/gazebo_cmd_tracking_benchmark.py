@@ -4,9 +4,11 @@
 Prerequisite: start Gazebo with the RL policy path, for example:
 
   ros2 launch tarantula_bringup sim.launch.py \\
-    gui:=false leveling:=false rl_policy:=true \\
-    stand_hold:=true rl_policy_mode:=wheel_only truth_odom:=false \\
-    policy_weights_npz:=/path/to/cmd_vel_actor.npz spawn_z:=0.45
+    gui:=false robot_model:=tarantula_v2.urdf.xacro \\
+    motion_control:=true start_motion_control:=true \\
+    rl_compensation_enabled:=true truth_odom:=false \\
+    wheel_collision:=cylinder policy_weights_npz:=/path/to/cmd_vel_actor.npz \\
+    spawn_z:=0.55
 
 The benchmark publishes a fixed /cmd_vel sequence, samples Gazebo truth pose via
 `ign model -m tarantula -p`, and records command tracking metrics.
@@ -33,12 +35,14 @@ from std_msgs.msg import Float64MultiArray
 
 DEFAULT_SEQUENCE = [
     ("stop", 0.0, 0.0),
-    ("forward", 0.2, 0.0),
-    ("backward", -0.2, 0.0),
-    ("turn_left", 0.0, 0.25),
-    ("turn_right", 0.0, -0.25),
-    ("arc_left", 0.18, 0.18),
-    ("arc_right", 0.18, -0.18),
+    ("forward", 0.1, 0.0),
+    ("backward", -0.1, 0.0),
+    ("turn_left", 0.0, 0.15),
+    ("turn_right", 0.0, -0.15),
+    ("turn_left_authority", 0.0, 0.25),
+    ("turn_right_authority", 0.0, -0.25),
+    ("arc_left", 0.1, 0.12),
+    ("arc_right", 0.1, -0.12),
     ("final_stop", 0.0, 0.0),
 ]
 
@@ -58,7 +62,6 @@ class BenchmarkNode(Node):
         super().__init__("gazebo_cmd_tracking_benchmark")
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.last_wheel_cmd: list[float] = []
-        self.last_susp_cmd: list[float] = []
         self.last_joint_state: JointState | None = None
         self.create_subscription(
             Float64MultiArray,
@@ -66,19 +69,10 @@ class BenchmarkNode(Node):
             self._wheel_cmd_cb,
             10,
         )
-        self.create_subscription(
-            Float64MultiArray,
-            "/suspension_controller/commands",
-            self._susp_cmd_cb,
-            10,
-        )
         self.create_subscription(JointState, "/joint_states", self._joint_cb, 10)
 
     def _wheel_cmd_cb(self, msg: Float64MultiArray) -> None:
         self.last_wheel_cmd = [float(v) for v in msg.data]
-
-    def _susp_cmd_cb(self, msg: Float64MultiArray) -> None:
-        self.last_susp_cmd = [float(v) for v in msg.data]
 
     def _joint_cb(self, msg: JointState) -> None:
         self.last_joint_state = msg
@@ -172,7 +166,21 @@ def sample_loop(
             wz = wrap_angle(pose.yaw - prev_pose.yaw) / dt
 
         wheel_cmd = node.last_wheel_cmd
-        susp_cmd = node.last_susp_cmd
+        hip_pos = []
+        if node.last_joint_state is not None:
+            positions = dict(zip(node.last_joint_state.name, node.last_joint_state.position))
+            hip_pos = [
+                float(positions[name])
+                for name in (
+                    "susp_fl_joint",
+                    "susp_fr_joint",
+                    "susp_ml_joint",
+                    "susp_mr_joint",
+                    "susp_rl_joint",
+                    "susp_rr_joint",
+                )
+                if name in positions
+            ]
         samples.append(
             {
                 "t_wall": time.time(),
@@ -188,7 +196,7 @@ def sample_loop(
                 "actual_vx": vx,
                 "actual_wz": wz,
                 "wheel_cmd_max_abs": max((abs(v) for v in wheel_cmd), default=0.0),
-                "susp_cmd_max_abs": max((abs(v) for v in susp_cmd), default=0.0),
+                "hip_pos_max_abs": max((abs(v) for v in hip_pos), default=0.0),
             }
         )
         prev_t = loop_t
@@ -214,7 +222,7 @@ def summarize_segment(samples: list[dict]) -> dict:
     rms_wz_error = math.sqrt(sum((float(s["actual_wz"]) - cmd_wz) ** 2 for s in usable) / len(usable))
     max_roll = max(abs(float(s["roll"])) for s in usable)
     max_pitch = max(abs(float(s["pitch"])) for s in usable)
-    max_susp_cmd = max(float(s["susp_cmd_max_abs"]) for s in usable)
+    max_hip_pos = max(float(s["hip_pos_max_abs"]) for s in usable)
     max_wheel_cmd = max(float(s["wheel_cmd_max_abs"]) for s in usable)
     displacement = math.hypot(float(end["x"]) - float(start["x"]), float(end["y"]) - float(start["y"]))
     direction_mismatch = (
@@ -236,9 +244,9 @@ def summarize_segment(samples: list[dict]) -> dict:
         "max_abs_roll_rad": max_roll,
         "max_abs_pitch_rad": max_pitch,
         "max_abs_wheel_cmd_rad_s": max_wheel_cmd,
-        "max_abs_susp_cmd_nm": max_susp_cmd,
-        "wheel_cmd_saturated": max_wheel_cmd >= 2.95,
-        "susp_cmd_saturated": max_susp_cmd >= 74.0,
+        "max_abs_hip_pos_rad": max_hip_pos,
+        "wheel_cmd_saturated": max_wheel_cmd >= 5.95,
+        "hip_near_limit": max_hip_pos >= 0.40,
         "direction_mismatch": direction_mismatch,
         "stuck": stuck,
     }

@@ -51,4 +51,30 @@ python3 src/tarantula_isaac/export_weights_v5.py \
   --npz-out generated/policies/cmd_vel_actor.npz
 ```
 
-The exported `.npz` is consumed by `tarantula_control.rl_suspension_policy`.
+The exported `.npz` is consumed by `tarantula_control.motion_control_node` when
+`rl_compensation_enabled:=true`.
+
+## Deterministic Eval
+
+Run this before any Gazebo judgement. The `open_loop` mode is the Isaac-side
+motion-control baseline; the `npz` mode evaluates the exported structured actor
+on the same command sequence.
+
+```bash
+python3 src/tarantula_isaac/eval_policy_v5.py \
+  --mode open_loop \
+  --num-envs 16 \
+  --terrain-dir "$(pwd)/generated/terrains/gazebo_demo/42" \
+  --out generated/benchmarks/isaac_eval/open_loop_summary.json
+
+python3 src/tarantula_isaac/eval_policy_v5.py \
+  --mode npz \
+  --policy-npz generated/policies/cmd_vel_actor.npz \
+  --num-envs 16 \
+  --terrain-dir "$(pwd)/generated/terrains/gazebo_demo/42" \
+  --out generated/benchmarks/isaac_eval/policy_summary.json
+```
+
+Reject a policy before Gazebo if Isaac eval shows immediate spawn termination,
+near-zero commanded displacement, large command-tracking error, or persistent
+action saturation.

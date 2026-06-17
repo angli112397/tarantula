@@ -1,35 +1,95 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""Tarantula rover articulation config for Isaac Lab baseline.
+"""Tarantula rover articulation config for the v2 baseline.
 
-Reuses the USD produced by the ``UrdfConverter`` run: ``susp_*_joint``
-position drive with stiffness=130/damping=11. Gazebo deployment mirrors this
-with an explicit bounded PD effort actuator in ``rl_suspension_policy.py``;
-we no longer rely on Gazebo-only joint spring tags.
-``wheel_*_joint`` is velocity-driven (``target_type="velocity"``,
-stiffness=``WHEEL_DRIVE_GAIN``) for direct wheel control.
+The Gazebo and Isaac baselines share ``tarantula_core_v2.urdf.xacro``:
+``susp_*_joint`` is a position-controlled hip trim/posture joint and
+``wheel_*_joint`` is velocity-driven for direct wheel control.
 """
 
 import os
+import hashlib
+import shutil
+import subprocess
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 TARANTULA_USD_DIR = "/tmp/tarantula_usd"
-TARANTULA_USD_NAME = "tarantula_core_baseline_pd_sphere_wheels.usd"
+TARANTULA_USD_NAME = "tarantula_v2_actuated_cylinder_wheels.usd"
 TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, TARANTULA_USD_NAME)
 
-# Generated via: xacro tarantula_core.urdf.xacro lidar:=false > URDF_PATH
-URDF_PATH = "/tmp/tarantula_core.urdf"
+# Generated via: xacro tarantula_core_v2.urdf.xacro wheel_collision:=cylinder lidar:=false > URDF_PATH
+URDF_PATH = "/tmp/tarantula_v2.urdf"
+URDF_STAMP_PATH = f"{URDF_PATH}.sha256"
+USD_STAMP_PATH = os.path.join(TARANTULA_USD_DIR, f"{TARANTULA_USD_NAME}.sha256")
 
 # Velocity-drive P gain for wheel_*_joint (rad/s -> N*m). Wheel limit is
-# effort=38 N*m / velocity=30 rad/s. Chosen so that a full-scale RL action
-# (+-1 * action_scale_wheel_omega=3.0 rad/s, see suspension_env_cfg.py) demands
-# about 38 N*m -- the full [-1,1] action range maps onto the actuator's full
-# torque range with no saturated dead zone.
+# effort=38 N*m / velocity=30 rad/s. Stage A uses a ±6 rad/s final wheel target
+# envelope around the scheduled skid-steer baseline. This gain preserves enough
+# yaw authority for large differential wheel targets.
 WHEEL_DRIVE_GAIN = 12.7
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _xacro_sources() -> list[Path]:
+    urdf_dir = _repo_root() / "src" / "tarantula_description" / "urdf"
+    return [
+        urdf_dir / "tarantula_core_v2.urdf.xacro",
+        urdf_dir / "tarantula_chassis_v2.xacro",
+        urdf_dir / "tarantula_common.xacro",
+    ]
+
+
+def _fingerprint(paths: list[Path], extra: str = "") -> str:
+    digest = hashlib.sha256()
+    digest.update(extra.encode("utf-8"))
+    for path in paths:
+        digest.update(str(path).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _read_stamp(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _ensure_core_urdf(urdf_path: str) -> None:
+    """Generate the temporary Isaac URDF from xacro when sources changed."""
+    source_paths = _xacro_sources()
+    source_hash = _fingerprint(source_paths, extra="v2;wheel_collision=cylinder;lidar=false")
+    if os.path.exists(urdf_path) and _read_stamp(URDF_STAMP_PATH) == source_hash:
+        return
+
+    xacro_path = source_paths[0]
+    xacro_bin = shutil.which("xacro") or "/opt/ros/humble/bin/xacro"
+    if not os.path.exists(xacro_bin):
+        raise FileNotFoundError(
+            f"{urdf_path} not found and xacro is unavailable. Source ROS 2 Humble or install xacro, then run:\n"
+            f"  xacro {xacro_path} wheel_collision:=cylinder lidar:=false > {urdf_path}"
+        )
+    if not xacro_path.exists():
+        raise FileNotFoundError(f"missing Tarantula xacro source: {xacro_path}")
+
+    os.makedirs(os.path.dirname(urdf_path), exist_ok=True)
+    result = subprocess.run(
+        [xacro_bin, str(xacro_path), "wheel_collision:=cylinder", "lidar:=false"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    Path(urdf_path).write_text(result.stdout, encoding="utf-8")
+    Path(URDF_STAMP_PATH).write_text(source_hash, encoding="utf-8")
 
 
 def _compute_wheel_bottom_z(urdf_path: str) -> float:
@@ -44,12 +104,7 @@ def _compute_wheel_bottom_z(urdf_path: str) -> float:
     is violated so a future chassis redesign with rotated joint origins fails
     loudly here instead of silently producing a wrong spawn height.
     """
-    if not os.path.exists(urdf_path):
-        raise FileNotFoundError(
-            f"{urdf_path} not found -- generate it first with (ROS sourced):\n"
-            "  xacro src/tarantula_description/urdf/tarantula_core.urdf.xacro lidar:=false"
-            f" > {urdf_path}"
-        )
+    _ensure_core_urdf(urdf_path)
 
     root = ET.parse(urdf_path).getroot()
 
@@ -109,8 +164,13 @@ SPAWN_Z_OFFSET = SPAWN_GROUND_CLEARANCE - _compute_wheel_bottom_z(URDF_PATH)
 
 
 def ensure_tarantula_usd(urdf_path: str = URDF_PATH) -> str:
-    """Regenerate the tarantula USD if missing (PD actuator + sphere-wheel collision config)."""
-    if os.path.exists(TARANTULA_USD_PATH):
+    """Regenerate the tarantula USD if missing or if the URDF/control contract changed."""
+    _ensure_core_urdf(urdf_path)
+    usd_hash = _fingerprint(
+        [Path(urdf_path)],
+        extra=f"usd={TARANTULA_USD_NAME};wheel_drive_gain={WHEEL_DRIVE_GAIN}",
+    )
+    if os.path.exists(TARANTULA_USD_PATH) and _read_stamp(USD_STAMP_PATH) == usd_hash:
         return TARANTULA_USD_PATH
 
     from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
@@ -132,7 +192,9 @@ def ensure_tarantula_usd(urdf_path: str = URDF_PATH) -> str:
             ),
         ),
     )
-    return UrdfConverter(urdf_cfg).usd_path
+    usd_path = UrdfConverter(urdf_cfg).usd_path
+    Path(USD_STAMP_PATH).write_text(usd_hash, encoding="utf-8")
+    return usd_path
 
 
 TARANTULA_CFG = ArticulationCfg(

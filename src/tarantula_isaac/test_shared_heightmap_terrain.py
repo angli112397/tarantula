@@ -31,6 +31,21 @@ class SharedHeightmapTerrainTest(unittest.TestCase):
         self.assertAlmostEqual(float(origins[0, 0, 1]), -6.0)
         self.assertAlmostEqual(float(origins[0, 0, 2]), 0.2)
 
+    def test_curriculum_origins_can_filter_levels(self):
+        metadata = json.loads(Path("generated/terrains/rl_curriculum/42/metadata.json").read_text(encoding="utf-8"))
+        origins = origins_from_metadata(metadata, num_envs=16, spawn_z=0.2, min_level=1, max_level=2)
+
+        self.assertEqual(origins.shape, (2, 6, 3))
+        self.assertAlmostEqual(float(origins[0, 0, 0]), -10.0)
+        self.assertAlmostEqual(float(origins[0, 0, 1]), -2.0)
+        self.assertAlmostEqual(float(origins[1, 0, 1]), 2.0)
+
+    def test_curriculum_origin_level_range_must_be_valid(self):
+        metadata = json.loads(Path("generated/terrains/rl_curriculum/42/metadata.json").read_text(encoding="utf-8"))
+
+        with self.assertRaises(ValueError):
+            origins_from_metadata(metadata, num_envs=16, spawn_z=0.2, min_level=3, max_level=1)
+
     def test_demo_origins_are_spread_on_map(self):
         metadata = json.loads(Path("generated/terrains/gazebo_demo/42/metadata.json").read_text(encoding="utf-8"))
         origins = origins_from_metadata(metadata, num_envs=16, spawn_z=0.2)
@@ -38,6 +53,12 @@ class SharedHeightmapTerrainTest(unittest.TestCase):
         self.assertEqual(origins.shape, (4, 4, 3))
         self.assertGreater(float(origins[:, :, 0].max() - origins[:, :, 0].min()), 8.0)
         self.assertGreater(float(origins[:, :, 1].max() - origins[:, :, 1].min()), 5.0)
+
+    def test_level_filter_requires_curriculum_origins(self):
+        metadata = json.loads(Path("generated/terrains/gazebo_demo/42/metadata.json").read_text(encoding="utf-8"))
+
+        with self.assertRaises(ValueError):
+            origins_from_metadata(metadata, num_envs=16, spawn_z=0.2, min_level=0, max_level=1)
 
     def test_origins_are_lifted_above_local_height(self):
         terrain_dir = Path("generated/terrains/gazebo_demo/42")

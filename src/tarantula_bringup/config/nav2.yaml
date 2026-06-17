@@ -1,12 +1,12 @@
 # Nav2 配置（Humble）—— 与 slam_toolbox 在线建图共用（map->odom 由 SLAM 提供，
-# 无 AMCL/map_server）。cmd_vel 在 launch 里 remap 到 diff_drive_controller。
+# 无 AMCL/map_server）。cmd_vel 直接进入 motion_control_node 的 /cmd_vel。
 
 bt_navigator:
   ros__parameters:
     use_sim_time: true
     global_frame: map
     robot_base_frame: base_link
-    odom_topic: /diff_drive_controller/odom
+    odom_topic: /tarantula/truth_odom
     bt_loop_duration: 10
     default_server_timeout: 20
 

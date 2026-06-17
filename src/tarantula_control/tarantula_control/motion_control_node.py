@@ -1,0 +1,249 @@
+"""Classical motion-control node with optional RL wheel compensation.
+
+Stage A motion-control baseline:
+  - 传统 skid-steer controller 将 /cmd_vel 映射为 6 个驱动轮速度目标
+  - RL 可选输出 action[0:3] 作为 structured skid-steer compensation:
+    track_scale_delta, left_drive_scale_delta, right_drive_scale_delta
+  - 不发布 hip/suspension 命令；v2 baseline 的 hip 姿态由
+    JointTrajectoryController 或外部 posture profile 负责
+
+观测构成：
+  projected_gravity_b(3)  <- /imu/data
+  root_ang_vel_b(3)        <- /imu/data
+  susp_joint_pos(6)        <- /joint_states (LEGS 顺序)
+  susp_joint_vel(6)        <- /joint_states
+  wheel_joint_vel(6)       <- /joint_states
+  wheel_force(18)          <- /ft_wheel/{leg}，Fx/Fy/Fz / nominal_wheel_load
+  cmd_vx(1)                <- /cmd_vel.linear.x, fallback ROS 参数
+  cmd_wz(1)                <- /cmd_vel.angular.z, fallback ROS 参数
+  prev_action(3)           <- 上一步 structured compensation 策略输出
+
+控制常量：
+  compensation action scale 和 wheel clamp 优先从 actor .npz metadata 读取；
+  未启用 RL 时使用 control_interfaces.py 中的传统主控默认值。
+"""
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
+from geometry_msgs.msg import Twist, Wrench
+from sensor_msgs.msg import Imu, JointState
+from std_msgs.msg import Float64MultiArray
+import time
+
+from .control_interfaces import (
+    MAX_ABS_WHEEL_OMEGA,
+)
+from .motion_control import (
+    MotionControlConfig,
+    SkidSteerMotionController,
+    STAGE_A_ACTION_DIM,
+    STAGE_A_OBSERVATION_DIM,
+    build_stage_a_observation,
+)
+from .rl_policy import RLWheelCompensationPolicy
+from .suspension_core import LEGS, projected_gravity
+
+
+class MotionControlNode(Node):
+    def __init__(self):
+        super().__init__('motion_control_node')
+        self.declare_parameter('rate', 30.0)
+        self.declare_parameter('cmd_vx', 0.1)
+        self.declare_parameter('cmd_wz', 0.0)
+        self.declare_parameter('max_abs_cmd_vx', 0.3)
+        self.declare_parameter('max_abs_cmd_wz', 0.4)
+        self.declare_parameter('arc_track_scale', 1.0)
+        self.declare_parameter('pure_turn_track_scale', 3.0)
+        self.declare_parameter('track_scale_transition_vx', 0.08)
+        self.declare_parameter('track_scale_delta_limit', 0.3)
+        self.declare_parameter('drive_scale_delta_limit', 0.2)
+        self.declare_parameter('yaw_rate_kp', 2.0)
+        self.declare_parameter('yaw_rate_ki', 0.0)
+        self.declare_parameter('yaw_integral_limit', 0.8)
+        self.declare_parameter('max_wheel_accel', 12.0)
+        self.declare_parameter('pure_turn_forward_bias', 0.0)
+        self.declare_parameter('pure_turn_vx_deadband', 0.03)
+        self.declare_parameter('policy_weights_npz', '')
+        self.declare_parameter('rl_compensation_enabled', True)
+
+        weights_npz = self.get_parameter('policy_weights_npz').value
+        self.rl_compensation_enabled = bool(self.get_parameter('rl_compensation_enabled').value)
+        self.policy = RLWheelCompensationPolicy(weights_npz_path=weights_npz) if self.rl_compensation_enabled else None
+        max_abs_wheel_omega = (
+            self.policy.max_abs_wheel_omega if self.policy is not None else MAX_ABS_WHEEL_OMEGA
+        )
+        self.motion_controller = SkidSteerMotionController(MotionControlConfig(
+            max_abs_cmd_vx=float(self.get_parameter('max_abs_cmd_vx').value),
+            max_abs_cmd_wz=float(self.get_parameter('max_abs_cmd_wz').value),
+            max_abs_wheel_omega=max_abs_wheel_omega,
+            arc_track_scale=float(self.get_parameter('arc_track_scale').value),
+            pure_turn_track_scale=float(self.get_parameter('pure_turn_track_scale').value),
+            track_scale_transition_vx=float(self.get_parameter('track_scale_transition_vx').value),
+            track_scale_delta_limit=float(self.get_parameter('track_scale_delta_limit').value),
+            drive_scale_delta_limit=float(self.get_parameter('drive_scale_delta_limit').value),
+            yaw_rate_kp=float(self.get_parameter('yaw_rate_kp').value),
+            yaw_rate_ki=float(self.get_parameter('yaw_rate_ki').value),
+            yaw_integral_limit=float(self.get_parameter('yaw_integral_limit').value),
+            max_wheel_accel=float(self.get_parameter('max_wheel_accel').value),
+            pure_turn_forward_bias=float(self.get_parameter('pure_turn_forward_bias').value),
+            pure_turn_vx_deadband=float(self.get_parameter('pure_turn_vx_deadband').value),
+        ))
+        initial_command = self.motion_controller.limit_command(
+            float(self.get_parameter('cmd_vx').value),
+            float(self.get_parameter('cmd_wz').value),
+        )
+        self.cmd_vx, self.cmd_wz = initial_command.vx, initial_command.wz
+
+        self.proj_grav = (0.0, 0.0, -1.0)
+        self.ang_vel = (0.0, 0.0, 0.0)
+        self.joint_pos = {leg: 0.0 for leg in LEGS}
+        self.joint_vel = {leg: 0.0 for leg in LEGS}
+        self.wheel_vel = {leg: 0.0 for leg in LEGS}
+        self.wheel_force = {leg: (0.0, 0.0, 0.0) for leg in LEGS}  # Fx/Fy/Fz in N
+        self.prev_action = np.zeros(STAGE_A_ACTION_DIM, dtype=np.float32)
+        self.joint_seen = False
+        self.last_step_time = time.monotonic()
+
+        self.wheel_pub = self.create_publisher(
+            Float64MultiArray, '/wheel_velocity_controller/commands', 10)
+
+        self.create_subscription(Imu, '/imu/data', self.imu_cb, 50)
+        self.create_subscription(JointState, '/joint_states', self.joint_cb, 50)
+        self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_cb, 10)
+        for leg in LEGS:
+            self.create_subscription(
+                Wrench, f'/ft_wheel/{leg}',
+                lambda msg, l=leg: self.ft_wheel_cb(msg, l),
+                50,
+            )
+
+        rate = self.get_parameter('rate').value
+        self.create_timer(1.0 / rate, self.step)
+        self.add_on_set_parameters_callback(self._on_parameter_update)
+        obs_dim = self.policy.obs_dim if self.policy is not None else STAGE_A_OBSERVATION_DIM
+        action_dim = self.policy.action_dim if self.policy is not None else 0
+        self.get_logger().info(
+            f'motion controller started (rl_compensation_enabled={self.rl_compensation_enabled}, '
+            f'action_dim={action_dim}, obs_dim={obs_dim}, '
+            f'velocity_source=none_in_actor, '
+            f'max_abs_wheel_omega={self.motion_controller.config.max_abs_wheel_omega}, '
+            f'arc_track_scale={self.motion_controller.config.arc_track_scale}, '
+            f'pure_turn_track_scale={self.motion_controller.config.pure_turn_track_scale}, '
+            f'track_scale_transition_vx={self.motion_controller.config.track_scale_transition_vx}, '
+            f'track_scale_delta_limit={self.motion_controller.config.track_scale_delta_limit}, '
+            f'drive_scale_delta_limit={self.motion_controller.config.drive_scale_delta_limit}, '
+            f'yaw_rate_kp={self.motion_controller.config.yaw_rate_kp}, '
+            f'yaw_rate_ki={self.motion_controller.config.yaw_rate_ki}, '
+            f'max_wheel_accel={self.motion_controller.config.max_wheel_accel}, '
+            f'pure_turn_forward_bias={self.motion_controller.config.pure_turn_forward_bias}, '
+            f'cmd_vx={self.cmd_vx} m/s, cmd_wz={self.cmd_wz} rad/s, '
+            f'policy_weights_npz={weights_npz or "<none>"}).')
+
+    def _on_parameter_update(self, params):
+        updates = {}
+        for param in params:
+            if param.name in {
+                'max_abs_cmd_vx',
+                'max_abs_cmd_wz',
+                'max_abs_wheel_omega',
+                'arc_track_scale',
+                'pure_turn_track_scale',
+                'track_scale_transition_vx',
+                'track_scale_delta_limit',
+                'drive_scale_delta_limit',
+                'yaw_rate_kp',
+                'yaw_rate_ki',
+                'yaw_integral_limit',
+                'max_wheel_accel',
+                'pure_turn_forward_bias',
+                'pure_turn_vx_deadband',
+            }:
+                updates[param.name] = float(param.value)
+        if updates:
+            self.motion_controller.update_config(**updates)
+            self.motion_controller.reset_feedback()
+            self.get_logger().info(
+                'updated motion control parameters: '
+                + ', '.join(f'{key}={value}' for key, value in sorted(updates.items()))
+            )
+        return SetParametersResult(successful=True)
+
+    def imu_cb(self, msg: Imu):
+        q = msg.orientation
+        self.proj_grav = projected_gravity(q.w, q.x, q.y, q.z)
+        self.ang_vel = (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z)
+
+    def joint_cb(self, msg: JointState):
+        for i, name in enumerate(msg.name):
+            if name.startswith('susp_') and name.endswith('_joint'):
+                leg = name[5:-6]
+                if leg in self.joint_pos:
+                    self.joint_pos[leg] = msg.position[i]
+                    if i < len(msg.velocity):
+                        self.joint_vel[leg] = msg.velocity[i]
+            elif name.startswith('wheel_') and name.endswith('_joint'):
+                leg = name[6:-6]
+                if leg in self.wheel_vel and i < len(msg.velocity):
+                    self.wheel_vel[leg] = msg.velocity[i]
+        self.joint_seen = True
+
+    def ft_wheel_cb(self, msg: Wrench, leg: str):
+        self.wheel_force[leg] = (msg.force.x, msg.force.y, msg.force.z)
+
+    def cmd_vel_cb(self, msg: Twist):
+        command = self.motion_controller.limit_command(msg.linear.x, msg.angular.z)
+        self.cmd_vx, self.cmd_wz = command.vx, command.wz
+
+    def step(self):
+        if not self.joint_seen:
+            return
+
+        ang_vel_b = self.ang_vel
+        now = time.monotonic()
+        dt = max(now - self.last_step_time, 0.0)
+        self.last_step_time = now
+
+        command = self.motion_controller.limit_command(self.cmd_vx, self.cmd_wz)
+        action = np.zeros_like(self.prev_action)
+        if self.policy is not None:
+            obs = build_stage_a_observation(
+                projected_gravity_b=self.proj_grav,
+                root_ang_vel_b=ang_vel_b,
+                susp_joint_pos=self.joint_pos,
+                susp_joint_vel=self.joint_vel,
+                wheel_joint_vel=self.wheel_vel,
+                wheel_force=self.wheel_force,
+                command=command,
+                prev_action=self.prev_action,
+            )
+            action = self.policy.act(obs)
+            self.prev_action = action
+
+        compensation = action if self.policy is not None else None
+        wheel_cmds = self.motion_controller.compensated_wheel_targets(
+            command,
+            compensation,
+            measured_wz=ang_vel_b[2],
+            dt=dt,
+        )
+        self.wheel_pub.publish(Float64MultiArray(data=wheel_cmds))
+
+
+def main():
+    rclpy.init()
+    node = MotionControlNode()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+
+if __name__ == '__main__':
+    main()

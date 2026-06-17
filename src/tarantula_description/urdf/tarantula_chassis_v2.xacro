@@ -1,0 +1,163 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find tarantula_description)/urdf/tarantula_common.xacro"/>
+
+  <xacro:property name="v2_front_pivot_x" value="${pivot_x}"/>
+  <xacro:property name="v2_mid_pivot_x" value="${pivot_mx}"/>
+  <xacro:property name="v2_rear_pivot_x" value="${-pivot_x}"/>
+  <xacro:property name="v2_arm_length" value="${arm_length}"/>
+  <xacro:property name="v2_arm_width" value="0.048"/>
+  <xacro:property name="v2_arm_height" value="0.060"/>
+  <xacro:property name="v2_hip_hub_radius" value="0.040"/>
+  <xacro:property name="v2_hip_hub_width" value="0.080"/>
+  <xacro:property name="v2_wheel_hub_radius" value="0.055"/>
+  <xacro:property name="v2_wheel_hub_extra_width" value="0.005"/>
+  <xacro:property name="v2_wheel_lateral_offset" value="0.065"/>
+  <xacro:property name="v2_wheel_axle_radius" value="0.033"/>
+  <xacro:property name="v2_wheel_axle_width" value="0.070"/>
+
+  <xacro:macro name="v2_leg" params="prefix id x side dir wheel_collision">
+    <!-- Actuated hip: posture/trim DOF only. Wheel-end compliance is omitted in
+         the Gazebo/Isaac baseline; low-speed motion and structured RL
+         compensation handle terrain response without adding a passive contact DOF. -->
+    <joint name="${prefix}susp_${id}_joint" type="revolute">
+      <parent link="${prefix}base_link"/>
+      <child link="${prefix}arm_${id}_link"/>
+      <origin xyz="${x} ${side*pivot_y} ${pivot_z}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-0.45" upper="0.45" effort="90" velocity="4"/>
+      <dynamics damping="16.0" friction="0.10"/>
+    </joint>
+
+    <link name="${prefix}arm_${id}_link">
+      <visual>
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${v2_hip_hub_radius}" length="${v2_hip_hub_width}"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <visual>
+        <origin xyz="${dir*v2_arm_length/2*cos(arm_angle)} 0 ${-v2_arm_length/2*sin(arm_angle)}"
+                rpy="0 ${dir*arm_angle} 0"/>
+        <geometry><box size="${v2_arm_length} ${v2_arm_width} ${v2_arm_height}"/></geometry>
+        <xacro:mat_accent/>
+      </visual>
+      <visual>
+        <origin xyz="${dir*v2_arm_length*cos(arm_angle)} 0 ${-v2_arm_length*sin(arm_angle)}"
+                rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${v2_wheel_axle_radius}" length="${v2_wheel_axle_width}"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <collision>
+        <origin xyz="${dir*v2_arm_length/2*cos(arm_angle)} 0 ${-v2_arm_length/2*sin(arm_angle)}"
+                rpy="0 ${dir*arm_angle} 0"/>
+        <geometry><box size="${v2_arm_length} ${v2_arm_width} ${v2_arm_height}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="${dir*v2_arm_length/2*cos(arm_angle)} 0 ${-v2_arm_length/2*sin(arm_angle)}"/>
+        <mass value="${arm_mass}"/>
+        <xacro:box_inertia m="${arm_mass}" x="${v2_arm_length}" y="${v2_arm_width}" z="${v2_arm_height}"/>
+      </inertial>
+    </link>
+
+    <joint name="${prefix}wheel_${id}_joint" type="continuous">
+      <parent link="${prefix}arm_${id}_link"/>
+      <child link="${prefix}wheel_${id}_link"/>
+      <origin xyz="${dir*v2_arm_length*cos(arm_angle)} ${side*v2_wheel_lateral_offset} ${-v2_arm_length*sin(arm_angle)}"
+              rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="38" velocity="30"/>
+      <dynamics damping="0.08"/>
+    </joint>
+
+    <link name="${prefix}wheel_${id}_link">
+      <visual>
+        <origin rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <xacro:mat_tire/>
+      </visual>
+      <visual>
+        <origin xyz="0 ${side*v2_wheel_hub_extra_width} 0" rpy="${PI/2} 0 0"/>
+        <geometry><cylinder radius="${v2_wheel_hub_radius}" length="${wheel_width + v2_wheel_hub_extra_width}"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <xacro:if value="${wheel_collision == 'sphere'}">
+        <collision name="wheel_${id}_contact_collision">
+          <geometry><sphere radius="${wheel_collision_radius}"/></geometry>
+        </collision>
+      </xacro:if>
+      <xacro:if value="${wheel_collision == 'cylinder'}">
+        <collision name="wheel_${id}_contact_collision">
+          <origin rpy="${PI/2} 0 0"/>
+          <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        </collision>
+      </xacro:if>
+      <inertial>
+        <origin rpy="${PI/2} 0 0"/>
+        <mass value="${wheel_mass}"/>
+        <xacro:cylinder_inertia m="${wheel_mass}" r="${wheel_radius}" h="${wheel_width}"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+
+  <xacro:macro name="tarantula_chassis_v2" params="prefix:='' wheel_collision:='cylinder'">
+    <link name="${prefix}base_link">
+      <visual><geometry><box size="${body_length} ${body_width} ${body_height}"/></geometry><xacro:mat_body/></visual>
+      <visual>
+        <origin xyz="0 0 ${body_height/2 + deck_standoff + deck_thick/2}"/>
+        <geometry><box size="0.55 0.30 ${deck_thick}"/></geometry>
+        <xacro:mat_hub/>
+      </visual>
+      <xacro:deck_post x="0.24"  y="0.12"/>
+      <xacro:deck_post x="0.24"  y="-0.12"/>
+      <xacro:deck_post x="-0.24" y="0.12"/>
+      <xacro:deck_post x="-0.24" y="-0.12"/>
+      <visual>
+        <origin xyz="${body_length/2 + 0.015} 0 0"/>
+        <geometry><box size="0.03 ${body_width} 0.06"/></geometry>
+        <xacro:mat_accent/>
+      </visual>
+      <visual>
+        <origin xyz="0 ${pivot_y} ${pivot_z + 0.02}"/>
+        <geometry><box size="${body_length} 0.05 0.07"/></geometry>
+        <xacro:mat_accent/>
+      </visual>
+      <visual>
+        <origin xyz="0 ${-pivot_y} ${pivot_z + 0.02}"/>
+        <geometry><box size="${body_length} 0.05 0.07"/></geometry>
+        <xacro:mat_accent/>
+      </visual>
+      <collision name="base_belly_collision">
+        <origin xyz="0 0 ${belly_z}"/>
+        <geometry><box size="${belly_length} ${belly_width} ${belly_height}"/></geometry>
+      </collision>
+      <inertial>
+        <origin xyz="${body_com_x} ${body_com_y} ${body_com_z}"/>
+        <mass value="${body_mass}"/>
+        <xacro:box_inertia m="${body_mass}" x="${body_length}" y="${body_width}" z="${body_height}"/>
+      </inertial>
+    </link>
+
+    <link name="${prefix}imu_link">
+      <inertial><mass value="0.05"/><xacro:box_inertia m="0.05" x="0.03" y="0.03" z="0.01"/></inertial>
+    </link>
+    <joint name="${prefix}imu_joint" type="fixed">
+      <parent link="${prefix}base_link"/>
+      <child link="${prefix}imu_link"/>
+      <origin xyz="0 0 ${body_height/2}"/>
+    </joint>
+
+    <link name="${prefix}payload_mount"/>
+    <joint name="${prefix}payload_mount_joint" type="fixed">
+      <parent link="${prefix}base_link"/>
+      <child link="${prefix}payload_mount"/>
+      <origin xyz="0 0 ${body_height/2 + deck_standoff + deck_thick}"/>
+    </joint>
+
+    <xacro:v2_leg prefix="${prefix}" id="fl" x="${v2_front_pivot_x}" side="1" dir="1" wheel_collision="${wheel_collision}"/>
+    <xacro:v2_leg prefix="${prefix}" id="fr" x="${v2_front_pivot_x}" side="-1" dir="1" wheel_collision="${wheel_collision}"/>
+    <xacro:v2_leg prefix="${prefix}" id="ml" x="${v2_mid_pivot_x}" side="1" dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:v2_leg prefix="${prefix}" id="mr" x="${v2_mid_pivot_x}" side="-1" dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:v2_leg prefix="${prefix}" id="rl" x="${v2_rear_pivot_x}" side="1" dir="-1" wheel_collision="${wheel_collision}"/>
+    <xacro:v2_leg prefix="${prefix}" id="rr" x="${v2_rear_pivot_x}" side="-1" dir="-1" wheel_collision="${wheel_collision}"/>
+  </xacro:macro>
+</robot>

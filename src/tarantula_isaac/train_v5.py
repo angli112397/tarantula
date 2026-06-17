@@ -20,9 +20,57 @@ parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--max_iterations", type=int, default=400)
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to warm-start from")
 parser.add_argument(
+    "--command-profile",
+    choices=("mixed", "yaw_only"),
+    default="mixed",
+    help="Command curriculum profile. yaw_only samples pure turns only.",
+)
+parser.add_argument(
+    "--track-scale-delta-limit",
+    type=float,
+    default=None,
+    help="Override maximum fractional effective-track correction.",
+)
+parser.add_argument(
+    "--drive-scale-delta-limit",
+    type=float,
+    default=None,
+    help="Override maximum fractional left/right drive correction.",
+)
+parser.add_argument(
+    "--max-abs-wheel-omega",
+    type=float,
+    default=None,
+    help="Override final wheel target clamp in rad/s.",
+)
+parser.add_argument(
+    "--entropy-coef",
+    type=float,
+    default=None,
+    help="Override PPO entropy coefficient.",
+)
+parser.add_argument(
+    "--action-saturation-weight",
+    type=float,
+    default=None,
+    help="Override action saturation penalty weight.",
+)
+parser.add_argument(
     "--terrain-dir",
     default=str(DEFAULT_TERRAIN_DIR),
     help="Generated terrain directory containing height.npy and metadata.json.",
+)
+parser.add_argument(
+    "--terrain-level-min",
+    type=int,
+    default=None,
+    help="Minimum rl_curriculum terrain row to sample for resets.",
+)
+parser.add_argument(
+    "--terrain-level-max",
+    type=int,
+    default=None,
+    help="Maximum rl_curriculum terrain row to sample for resets.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
@@ -63,12 +111,32 @@ def main():
 
     env_cfg = TarantulaSuspensionEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.terrain = make_shared_heightmap_terrain_cfg(args.terrain_dir)
+    env_cfg.terrain = make_shared_heightmap_terrain_cfg(
+        args.terrain_dir,
+        min_level=args.terrain_level_min,
+        max_level=args.terrain_level_max,
+    )
+    if args.track_scale_delta_limit is not None:
+        env_cfg.track_scale_delta_limit = float(args.track_scale_delta_limit)
+    if args.drive_scale_delta_limit is not None:
+        env_cfg.drive_scale_delta_limit = float(args.drive_scale_delta_limit)
+    if args.max_abs_wheel_omega is not None:
+        env_cfg.max_abs_wheel_omega = float(args.max_abs_wheel_omega)
+    if args.action_saturation_weight is not None:
+        env_cfg.reward_action_saturation_weight = float(args.action_saturation_weight)
+    if args.command_profile == "yaw_only":
+        env_cfg.command_stop_prob = 0.0
+        env_cfg.command_straight_prob = 0.0
+        env_cfg.command_pure_turn_prob = 1.0
+        env_cfg.command_wz_range = (-0.25, 0.25)
+        env_cfg.command_min_abs_wz = 0.25
 
     agent_cfg = TarantulaSuspensionPPORunnerCfg()
     agent_cfg.max_iterations = args.max_iterations
     if args.max_iterations <= 5:
         agent_cfg.save_interval = 1
+    if args.entropy_coef is not None:
+        agent_cfg.algorithm.entropy_coef = float(args.entropy_coef)
     agent_cfg.device = "cuda:0"
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _RSL_RL_VERSION)
 

@@ -1,29 +1,20 @@
 """RL PPO actor numpy forward pass.
 
-Stage A wheel-only actor:
-obs(41) = [projected_gravity_b(3), root_ang_vel_b(3), root_lin_vel_b(3),
+Stage A structured skid-steer compensation actor:
+obs(47) = [projected_gravity_b(3), root_ang_vel_b(3),
            susp_joint_pos(6, LEGS order), susp_joint_vel(6, LEGS order),
-           wheel_joint_vel(6, LEGS order), wheel_load(6, LEGS order),
-           cmd_vx(1), cmd_wz(1), prev_action(6)]
+           wheel_joint_vel(6, LEGS order), wheel_force(18, LEGS order),
+           cmd_vx(1), cmd_wz(1), prev_action(3)]
 
-action(6) = clip(MLP(normalize(obs)), -1, 1)
-  action[0:6] -> wheel velocity targets * ACTION_SCALE_WHEEL_OMEGA (rad/s)
+action(3) = clip(MLP(normalize(obs)), -1, 1)
+  action[0] -> bounded effective-track scale correction
+  action[1] -> bounded left-drive scale correction
+  action[2] -> bounded right-drive scale correction
 
-Legacy suspension+wheel actor:
-obs(47) = same prefix + prev_action(12)
-
-action(12) = clip(MLP(normalize(obs)), -1, 1)
-  action[0:6]  -> susp joint angle targets * ACTION_SCALE_SUSP (rad)
-  action[6:12] -> wheel velocity targets  * ACTION_SCALE_WHEEL_OMEGA (rad/s)
-
-MLP: Linear(obs_dim,128) -> ELU -> Linear(128,128) -> ELU -> Linear(128,action_dim)
+MLP: Linear(47,128) -> ELU -> Linear(128,128) -> ELU -> Linear(128,3)
 obs_normalizer = EmpiricalNormalization (actor_obs_normalization=True).
 """
 import numpy as np
-
-# Must match suspension_env_cfg.py
-ACTION_SCALE_SUSP = 0.5         # rad, direct susp joint angle
-ACTION_SCALE_WHEEL_OMEGA = 3.0  # rad/s, per-wheel velocity
 
 _OBS_NORM_EPS = 1e-2  # rsl_rl EmpiricalNormalization default
 
@@ -32,7 +23,7 @@ def _elu(x: np.ndarray) -> np.ndarray:
     return np.where(x > 0.0, x, np.exp(np.minimum(x, 0.0)) - 1.0)
 
 
-class RLSuspensionPolicy:
+class RLWheelCompensationPolicy:
     """Stateless MLP actor, clipped to [-1, 1]."""
 
     def __init__(self, weights_npz_path: str = ""):
@@ -46,10 +37,13 @@ class RLSuspensionPolicy:
         self.obs_std = npz["obs_normalizer._std"].reshape(-1)
         self.obs_dim = int(self.w0.shape[1])
         self.action_dim = int(self.w4.shape[0])
+        self.max_abs_wheel_omega = float(npz["max_abs_wheel_omega"][0]) if "max_abs_wheel_omega" in npz else 6.0
         if self.obs_mean.shape[0] != self.obs_dim:
             raise ValueError(f"obs normalizer has {self.obs_mean.shape[0]} dims, actor expects {self.obs_dim}")
-        if self.action_dim not in (6, 12):
-            raise ValueError(f"unsupported action dim {self.action_dim}; expected 6 or 12")
+        if self.obs_dim != 47:
+            raise ValueError(f"unsupported obs dim {self.obs_dim}; expected current Stage A obs dim 47")
+        if self.action_dim != 3:
+            raise ValueError(f"unsupported action dim {self.action_dim}; expected current Stage A action dim 3")
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         if obs.shape[0] != self.obs_dim:

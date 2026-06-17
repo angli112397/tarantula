@@ -2,7 +2,7 @@
 <package format="3">
   <name>tarantula_control</name>
   <version>0.1.0</version>
-  <description>Active suspension controller for the Tarantula six-wheel chassis</description>
+  <description>Motion control, posture profiles, and diagnostics for the Tarantula six-wheel chassis</description>
   <maintainer email="angli23@yahoo.com">ang</maintainer>
   <license>MIT</license>
 
