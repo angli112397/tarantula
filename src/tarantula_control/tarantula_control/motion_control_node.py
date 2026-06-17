@@ -54,9 +54,7 @@ class MotionControlNode(Node):
         self.declare_parameter('cmd_wz', 0.0)
         self.declare_parameter('max_abs_cmd_vx', 0.3)
         self.declare_parameter('max_abs_cmd_wz', 0.4)
-        self.declare_parameter('arc_track_scale', 1.0)
         self.declare_parameter('pure_turn_track_scale', 3.0)
-        self.declare_parameter('track_scale_transition_vx', 0.08)
         self.declare_parameter('track_scale_delta_limit', 0.3)
         self.declare_parameter('drive_scale_delta_limit', 0.2)
         self.declare_parameter('yaw_rate_kp', 0.0)
@@ -67,7 +65,6 @@ class MotionControlNode(Node):
         self.declare_parameter('pure_turn_vx_deadband', 0.03)
         self.declare_parameter('turn_enter_wz', 0.08)
         self.declare_parameter('turn_exit_wz', 0.04)
-        self.declare_parameter('command_strategy', 'stop_turn_drive')
         self.declare_parameter('policy_weights_npz', '')
         self.declare_parameter('rl_compensation_enabled', True)
 
@@ -91,9 +88,7 @@ class MotionControlNode(Node):
             max_abs_cmd_vx=float(self.get_parameter('max_abs_cmd_vx').value),
             max_abs_cmd_wz=float(self.get_parameter('max_abs_cmd_wz').value),
             max_abs_wheel_omega=max_abs_wheel_omega,
-            arc_track_scale=float(self.get_parameter('arc_track_scale').value),
             pure_turn_track_scale=float(self.get_parameter('pure_turn_track_scale').value),
-            track_scale_transition_vx=float(self.get_parameter('track_scale_transition_vx').value),
             track_scale_delta_limit=track_scale_delta_limit,
             drive_scale_delta_limit=drive_scale_delta_limit,
             yaw_rate_kp=float(self.get_parameter('yaw_rate_kp').value),
@@ -104,7 +99,6 @@ class MotionControlNode(Node):
             pure_turn_vx_deadband=float(self.get_parameter('pure_turn_vx_deadband').value),
             turn_enter_wz=float(self.get_parameter('turn_enter_wz').value),
             turn_exit_wz=float(self.get_parameter('turn_exit_wz').value),
-            command_strategy=str(self.get_parameter('command_strategy').value),
         )
         self.command_shaper = CommandShaper(control_config)
         self.motion_controller = SkidSteerMotionController(control_config)
@@ -149,9 +143,7 @@ class MotionControlNode(Node):
             f'action_dim={action_dim}, obs_dim={obs_dim}, '
             f'velocity_source=none_in_actor, '
             f'max_abs_wheel_omega={self.motion_controller.config.max_abs_wheel_omega}, '
-            f'arc_track_scale={self.motion_controller.config.arc_track_scale}, '
             f'pure_turn_track_scale={self.motion_controller.config.pure_turn_track_scale}, '
-            f'track_scale_transition_vx={self.motion_controller.config.track_scale_transition_vx}, '
             f'track_scale_delta_limit={self.motion_controller.config.track_scale_delta_limit}, '
             f'drive_scale_delta_limit={self.motion_controller.config.drive_scale_delta_limit}, '
             f'yaw_rate_kp={self.motion_controller.config.yaw_rate_kp}, '
@@ -160,7 +152,6 @@ class MotionControlNode(Node):
             f'pure_turn_forward_bias={self.motion_controller.config.pure_turn_forward_bias}, '
             f'turn_enter_wz={self.motion_controller.config.turn_enter_wz}, '
             f'turn_exit_wz={self.motion_controller.config.turn_exit_wz}, '
-            f'command_strategy={self.motion_controller.config.command_strategy}, '
             f'cmd_vx={self.cmd_vx} m/s, cmd_wz={self.cmd_wz} rad/s, '
             f'policy_weights_npz={weights_npz or "<none>"}).')
 
@@ -171,9 +162,7 @@ class MotionControlNode(Node):
                 'max_abs_cmd_vx',
                 'max_abs_cmd_wz',
                 'max_abs_wheel_omega',
-                'arc_track_scale',
                 'pure_turn_track_scale',
-                'track_scale_transition_vx',
                 'track_scale_delta_limit',
                 'drive_scale_delta_limit',
                 'yaw_rate_kp',
@@ -186,8 +175,6 @@ class MotionControlNode(Node):
                 'turn_exit_wz',
             }:
                 updates[param.name] = float(param.value)
-            elif param.name == 'command_strategy':
-                updates[param.name] = str(param.value)
         if updates:
             self.command_shaper.update_config(**updates)
             self.motion_controller.update_config(**updates)

@@ -70,7 +70,7 @@
 
 10. RL Stage A 为结构化轮速补偿：
    - Gazebo 中 hip 由 trajectory controller 维持自然/指定姿态；
-   - 传统 skid-steer controller 负责 `/cmd_vel -> wheel_target`；
+   - stop-turn-drive + 传统 skid-steer controller 负责 `/cmd_vel -> wheel_target`；
    - actor action 只输出 3 路结构化补偿：
      `track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`；
    - 最终轮速限幅从 actor `.npz` metadata 读取；

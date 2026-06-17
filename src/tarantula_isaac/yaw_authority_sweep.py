@@ -85,14 +85,7 @@ def _structured_wheel_target(
     track_delta = max(-1.0, min(1.0, float(track_action))) * float(cfg.track_scale_delta_limit)
     left_delta = max(-1.0, min(1.0, float(left_drive_action))) * float(cfg.drive_scale_delta_limit)
     right_delta = max(-1.0, min(1.0, float(right_drive_action))) * float(cfg.drive_scale_delta_limit)
-    vx_fraction = min(abs(cmd_vx) / max(float(cfg.track_scale_transition_vx), 1.0e-6), 1.0)
-    if abs(cmd_wz) < 1.0e-4:
-        base_track_scale = float(cfg.arc_track_scale)
-    else:
-        base_track_scale = (
-            float(cfg.arc_track_scale) * vx_fraction
-            + float(cfg.pure_turn_track_scale) * (1.0 - vx_fraction)
-        )
+    base_track_scale = float(cfg.pure_turn_track_scale) if abs(cmd_wz) >= 1.0e-4 else 1.0
     turn_track = EFFECTIVE_TRACK * base_track_scale * (1.0 + track_delta)
     left = (cmd_vx - 0.5 * turn_track * cmd_wz) * (1.0 + left_delta) / WHEEL_RADIUS
     right = (cmd_vx + 0.5 * turn_track * cmd_wz) * (1.0 + right_delta) / WHEEL_RADIUS

@@ -36,8 +36,8 @@ WHEEL_TARGET_DIM = 6
 STAGE_A_OBSERVATION_LAYOUT = (
     ("projected_gravity_b", 3, "IMU orientation"),
     ("root_ang_vel_b", 3, "IMU angular velocity"),
-    ("susp_joint_pos", 6, "joint_states hip/arm positions; susp_* is the legacy wire name"),
-    ("susp_joint_vel", 6, "joint_states hip/arm velocities; susp_* is the legacy wire name"),
+    ("susp_joint_pos", 6, "joint_states hip/arm positions"),
+    ("susp_joint_vel", 6, "joint_states hip/arm velocities"),
     ("wheel_joint_vel", 6, "joint_states wheel velocities"),
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
     ("cmd_vx", 1, "shaped execution forward velocity"),
@@ -50,12 +50,6 @@ class MotionMode(str, Enum):
     STOP = "stop"
     DRIVE = "drive"
     TURN = "turn"
-    ARC = "arc"
-
-
-class CommandStrategy(str, Enum):
-    CONTINUOUS = "continuous"
-    STOP_TURN_DRIVE = "stop_turn_drive"
 
 
 @dataclass(frozen=True)
@@ -63,9 +57,7 @@ class MotionControlConfig:
     max_abs_cmd_vx: float = 0.3
     max_abs_cmd_wz: float = 0.4
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
-    arc_track_scale: float = 1.0
     pure_turn_track_scale: float = 3.0
-    track_scale_transition_vx: float = 0.08
     track_scale_delta_limit: float = TRACK_SCALE_DELTA_LIMIT
     drive_scale_delta_limit: float = DRIVE_SCALE_DELTA_LIMIT
     yaw_rate_kp: float = 0.0
@@ -76,7 +68,6 @@ class MotionControlConfig:
     pure_turn_vx_deadband: float = 0.03
     turn_enter_wz: float = 0.08
     turn_exit_wz: float = 0.04
-    command_strategy: str = CommandStrategy.STOP_TURN_DRIVE.value
 
 
 @dataclass(frozen=True)
@@ -113,23 +104,6 @@ class CommandShaper:
         self.config = replace(self.config, **kwargs)
 
     def shape(self, command: MotionCommand) -> MotionCommand:
-        strategy = CommandStrategy(str(self.config.command_strategy))
-        if strategy == CommandStrategy.CONTINUOUS:
-            return self._shape_continuous(command)
-        return self._shape_stop_turn_drive(command)
-
-    def _shape_continuous(self, command: MotionCommand) -> MotionCommand:
-        if abs(command.vx) < 1.0e-4 and abs(command.wz) < 1.0e-4:
-            self._mode = MotionMode.STOP
-        elif abs(command.vx) >= 1.0e-4 and abs(command.wz) >= self.config.turn_enter_wz:
-            self._mode = MotionMode.ARC
-        elif abs(command.wz) >= self.config.turn_enter_wz:
-            self._mode = MotionMode.TURN
-        else:
-            self._mode = MotionMode.DRIVE
-        return command
-
-    def _shape_stop_turn_drive(self, command: MotionCommand) -> MotionCommand:
         abs_wz = abs(command.wz)
         if self._mode == MotionMode.TURN:
             if abs_wz <= self.config.turn_exit_wz:
@@ -197,16 +171,8 @@ class SkidSteerMotionController:
 
     def scheduled_track_scale(self, command: MotionCommand) -> float:
         if abs(command.wz) < 1.0e-4:
-            return self.config.arc_track_scale
-        vx_fraction = min(
-            abs(command.vx) / max(self.config.track_scale_transition_vx, 1.0e-6),
-            1.0,
-        )
-        pure_turn_weight = 1.0 - vx_fraction
-        return (
-            self.config.arc_track_scale * vx_fraction
-            + self.config.pure_turn_track_scale * pure_turn_weight
-        )
+            return 1.0
+        return self.config.pure_turn_track_scale
 
     def _bounded_compensation(
         self,

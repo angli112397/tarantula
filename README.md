@@ -6,7 +6,7 @@
 shared heightmap terrain
   -> Gazebo GUI / ROS2 integration
   -> v2 chassis baseline
-  -> classical skid-steer motion control
+  -> stop-turn-drive skid-steer motion control
   -> optional structured RL compensation
   -> Isaac Lab curriculum only after Gazebo/Isaac baselines agree
 ```
@@ -160,9 +160,8 @@ ROS control topics:
   data order is `enabled, track_scale_action, left_drive_action,
   right_drive_action, action_saturation, wheel_cmd_max_abs, cmd_vx, cmd_wz,
   measured_wz, motion_mode_turn`. `cmd_vx/cmd_wz` are the shaped execution
-  command values. With the default `command_strategy:=stop_turn_drive`, a
-  large-yaw input executes as `vx_exec=0,wz_exec=cmd_wz`; low-yaw driving
-  executes as `vx_exec=cmd_vx,wz_exec=0`.
+  command values. A large-yaw input executes as `vx_exec=0,wz_exec=cmd_wz`;
+  low-yaw driving executes as `vx_exec=cmd_vx,wz_exec=0`.
 
 Run the Gazebo command-tracking benchmark after launching the sim:
 
@@ -346,11 +345,10 @@ metric target is the shaped execution command, not the raw `/cmd_vel` pair.
 - Isaac reset origins are lifted to local heightmap height and kept inside a
   terrain-edge safety margin for RL.
 - Motion-control baseline is split into two layers. `CommandShaper` accepts
-  normal `/cmd_vel`; the default `command_strategy:=stop_turn_drive` turns
-  high-yaw commands into pure rotation and low-yaw commands into straight
-  drive. `command_strategy:=continuous` remains available for A/B testing.
-  `SkidSteerMotionController` then maps the shaped execution command to six
-  wheel velocity targets. `yaw_rate_kp` is default-off; measured-yaw feedback is
+  normal `/cmd_vel`, turns high-yaw commands into pure rotation, and turns
+  low-yaw commands into straight drive. `SkidSteerMotionController` then maps
+  the shaped execution command to six wheel velocity targets. `yaw_rate_kp` is
+  default-off; measured-yaw feedback is
   treated as an optional calibrated experiment because it can move the pure-turn
   rotation center away from the chassis center. RL is a switchable bounded
   structured compensation layer, not the owner of basic planar kinematics.
@@ -396,6 +394,5 @@ Stage 0 rejection gate: do not launch Gazebo unless deterministic Isaac eval
 shows lower weighted command error than open loop, no velocity terminations on
 the fixed sequence, and mean action saturation below 0.20. Failed Stage 0 runs on
 2026-06-17 showed good straight-line tracking but excessive action saturation
-and poor yaw authority in the old continuous-arc experiment. The deployable
-baseline now handles that by shape-first stop-turn-drive, matching Nav2
-rotation-shim style behavior.
+before the command-shaping baseline was frozen. The deployable baseline now uses
+shape-first stop-turn-drive, matching Nav2 rotation-shim style behavior.

@@ -192,14 +192,12 @@ def main():
         env_cfg.command_stop_prob = 0.0
         env_cfg.command_straight_prob = 0.0
         env_cfg.command_pure_turn_prob = 1.0
-        env_cfg.command_arc_prob = 0.0
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_wz = 0.25
     elif args.command_profile == "stage0":
         env_cfg.command_stop_prob = 0.20
         env_cfg.command_straight_prob = 0.40
         env_cfg.command_pure_turn_prob = 0.40
-        env_cfg.command_arc_prob = 0.0
         env_cfg.command_vx_range = (-0.16, 0.16)
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_vx = 0.08

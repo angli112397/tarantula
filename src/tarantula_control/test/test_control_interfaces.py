@@ -13,7 +13,6 @@ from tarantula_control.control_interfaces import (
 )
 from tarantula_control.motion_control import (
     CommandShaper,
-    CommandStrategy,
     STAGE_A_OBSERVATION_DIM,
     MotionMode,
     MotionControlConfig,
@@ -160,36 +159,9 @@ class ControlInterfacesTest(unittest.TestCase):
         wheel = controller.compensated_wheel_targets(command, np.ones(3, dtype=np.float32))
         self.assertEqual(wheel, [0.0] * 6)
 
-    def test_motion_controller_preserves_continuous_arc_command(self):
-        controller = SkidSteerMotionController(MotionControlConfig(
-            arc_track_scale=1.0,
-            pure_turn_track_scale=3.0,
-            turn_enter_wz=0.08,
-            turn_exit_wz=0.04,
-            yaw_rate_kp=0.0,
-            max_abs_wheel_omega=10.0,
-        ))
-        raw = controller.limit_command(0.16, 0.10)
-        wheel = controller.wheel_targets(raw, measured_wz=None)
-        self.assertGreater(wheel[0], 0.0)
-        self.assertGreater(wheel[1], wheel[0])
-
-    def test_command_shaper_continuous_classifies_without_rewriting_command(self):
-        shaper = CommandShaper(MotionControlConfig(
-            command_strategy=CommandStrategy.CONTINUOUS.value,
-            turn_enter_wz=0.08,
-            turn_exit_wz=0.04,
-        ))
-        command = SkidSteerMotionController().limit_command(0.1, 0.10)
-        execution = shaper.shape(command)
-        self.assertEqual(shaper.mode, MotionMode.ARC)
-        self.assertEqual(execution.vx, 0.1)
-        self.assertEqual(execution.wz, 0.10)
-
     def test_command_shaper_stop_turn_drive_hysteresis_rewrites_execution_command(self):
         controller = SkidSteerMotionController()
         shaper = CommandShaper(MotionControlConfig(
-            command_strategy=CommandStrategy.STOP_TURN_DRIVE.value,
             turn_enter_wz=0.08,
             turn_exit_wz=0.04,
         ))
@@ -207,24 +179,25 @@ class ControlInterfacesTest(unittest.TestCase):
         self.assertEqual(drive.wz, 0.0)
 
     def test_command_shaper_stop_turn_drive_stops_when_no_command(self):
-        shaper = CommandShaper(MotionControlConfig(command_strategy=CommandStrategy.STOP_TURN_DRIVE.value))
+        shaper = CommandShaper()
         stop = shaper.shape(SkidSteerMotionController().limit_command(0.0, 0.0))
         self.assertEqual(shaper.mode, MotionMode.STOP)
         self.assertEqual(stop.vx, 0.0)
         self.assertEqual(stop.wz, 0.0)
 
-    def test_arc_command_accepts_track_and_drive_compensation(self):
+    def test_raw_high_yaw_command_is_shaped_before_wheel_mapping(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            arc_track_scale=1.0,
             pure_turn_track_scale=3.0,
-            track_scale_transition_vx=0.08,
             yaw_rate_kp=0.0,
             max_abs_wheel_omega=10.0,
         ))
-        command = controller.limit_command(0.08, 0.2)
-        base = controller.compensated_wheel_targets(command, np.zeros(3, dtype=np.float32))
-        boosted = controller.compensated_wheel_targets(command, np.ones(3, dtype=np.float32))
-        self.assertNotEqual(boosted, base)
+        shaper = CommandShaper(MotionControlConfig(turn_enter_wz=0.08))
+        execution = shaper.shape(controller.limit_command(0.08, 0.2))
+        base = controller.compensated_wheel_targets(execution, np.zeros(3, dtype=np.float32))
+        boosted = controller.compensated_wheel_targets(execution, np.ones(3, dtype=np.float32))
+        self.assertEqual(execution.vx, 0.0)
+        self.assertEqual(execution.wz, 0.2)
+        self.assertEqual(controller.compensated_wheel_targets(execution, np.array([0.0, 1.0, 1.0], dtype=np.float32)), base)
         self.assertGreater(abs(boosted[0] - boosted[1]), abs(base[0] - base[1]))
 
     def test_stage_a_observation_layout_is_47d(self):

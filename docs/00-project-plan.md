@@ -133,13 +133,12 @@ Controller path:
 
 - launch with `motion_control:=true start_motion_control:=true rl_compensation_enabled:=false`;
 - `tarantula_control.motion_control.CommandShaper` is the application-facing
-  baseline policy: default `command_strategy:=stop_turn_drive` shapes high-yaw
-  `/cmd_vel` into pure turn execution and low-yaw commands into straight drive;
+  baseline policy: it shapes high-yaw `/cmd_vel` into pure turn execution and
+  low-yaw commands into straight drive;
 - `tarantula_control.motion_control.SkidSteerMotionController` is the wheel
   mapper: shaped execution command -> six wheel velocities;
 - the wheel mapper is calibrated skid-steer, not pure ideal differential drive:
-  `pure_turn_track_scale=3.0` is the pure-turn baseline and `arc_track_scale=1.0`
-  is retained only for `command_strategy:=continuous` A/B tests;
+  `pure_turn_track_scale=3.0` is the pure-turn baseline;
 - `yaw_rate_kp=0.0` by default. IMU yaw-rate feedback is an optional calibration
   experiment, not part of the frozen baseline, because it can move the pure-turn
   rotation center away from the chassis center;
@@ -192,9 +191,8 @@ The deployable controller is layered:
 
 The stop-turn-drive + classical skid-steer chain is the baseline and source of
 truth for normal planar motion. It must work without RL and must pass
-Gazebo/Isaac open-loop command tracking before any policy is judged. Continuous
-low-speed arcs are an A/B diagnostic, not a baseline gate; upper Navi is
-expected to correct heading by issuing turn/drive primitives.
+Gazebo/Isaac open-loop command tracking before any policy is judged. Upper Navi
+is expected to correct heading by issuing turn/drive primitives.
 
 The RL compensation layer is only allowed to output bounded structured
 skid-steer corrections. Its intended roles are:
@@ -337,8 +335,8 @@ Reward baseline follows the trimmed rough-terrain locomotion pattern used by leg
 - termination penalty
 ```
 
-Stage A command sampling is intentionally not uniform random over a continuous
-box. During training, each environment periodically resamples one of three
+Stage A command sampling is intentionally not uniform random over a wide
+`cmd_vel` box. During training, each environment periodically resamples one of three
 baseline command families so yaw does not disappear into near-zero angular
 commands and one episode is not dominated by a single easy command:
 
@@ -350,9 +348,8 @@ commands and one episode is not dominated by a single easy command:
 
 Straight commands use `|cmd_vx| >= 0.12 m/s`. Pure-turn commands use
 `|cmd_wz| >= 0.15 rad/s`. Left/right and forward/backward signs are sampled
-symmetrically. Raw arc sampling is disabled in the baseline. If an experiment
-samples a raw `vx+wz` command, stop-turn-drive shapes high-yaw commands into
-pure-turn execution before observation, reward, and benchmark scoring. The
+symmetrically. Raw high-yaw `vx+wz` commands in deterministic checks are shaped
+into pure-turn execution before observation, reward, and benchmark scoring. The
 `stage0` command profile narrows these ranges for the first terrain row; fixed
 Isaac evaluation and yaw-authority sweeps disable command resampling and set
 deterministic segment commands.
@@ -458,7 +455,7 @@ Immediate rules:
    0 or Ring 1 fails, fix model/control before training.
 5. Do not split every symptom into a separate investigation. Use the ring gate:
    one failing gate means inspect only the layer owned by that gate.
-6. Keep `command_strategy:=stop_turn_drive`, `yaw_rate_kp=0.0`, and
+6. Keep stop-turn-drive shaping, `yaw_rate_kp=0.0`, and
    `pure_turn_track_scale=3.0` as the calibrated classical expectation. Let RL
    adjust only bounded `track_scale_delta` and left/right drive deltas. Reject
    policies with high action edge-rate even if reward improves.

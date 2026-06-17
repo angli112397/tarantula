@@ -203,19 +203,10 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             torch.zeros_like(self._actions[:, 2]),
         )
 
-        vx_fraction = torch.clamp(
-            torch.abs(self._exec_cmd_vx) / max(float(self.cfg.track_scale_transition_vx), 1.0e-6),
-            0.0,
-            1.0,
-        )
-        base_track_scale = (
-            float(self.cfg.arc_track_scale) * vx_fraction
-            + float(self.cfg.pure_turn_track_scale) * (1.0 - vx_fraction)
-        )
         base_track_scale = torch.where(
-            torch.abs(self._exec_cmd_wz) < 1.0e-4,
-            torch.full_like(base_track_scale, float(self.cfg.arc_track_scale)),
-            base_track_scale,
+            torch.abs(self._exec_cmd_wz) >= 1.0e-4,
+            torch.full_like(self._exec_cmd_wz, float(self.cfg.pure_turn_track_scale)),
+            torch.ones_like(self._exec_cmd_wz),
         )
         turn_track = EFFECTIVE_TRACK * base_track_scale * (1.0 + track_delta)
         left = (self._exec_cmd_vx - 0.5 * turn_track * self._exec_cmd_wz) / WHEEL_RADIUS
@@ -526,7 +517,6 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 self.cfg.command_stop_prob
                 + self.cfg.command_straight_prob
                 + self.cfg.command_pure_turn_prob
-                + self.cfg.command_arc_prob
             ),
             1.0e-6,
         )
@@ -553,14 +543,5 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         if len(turn_ids) > 0:
             self._cmd_wz[turn_ids] = self._sample_abs_with_sign(
                 len(turn_ids), self.cfg.command_min_abs_wz, wz_abs_hi
-            )
-        arc_mask = r >= pure_turn_end
-        arc_ids = env_ids[arc_mask]
-        if len(arc_ids) > 0:
-            self._cmd_vx[arc_ids] = self._sample_abs_with_sign(
-                len(arc_ids), self.cfg.command_min_abs_vx, vx_abs_hi
-            )
-            self._cmd_wz[arc_ids] = self._sample_abs_with_sign(
-                len(arc_ids), self.cfg.command_min_abs_wz, wz_abs_hi
             )
         self._update_execution_commands()

@@ -77,7 +77,7 @@ DEFAULT_SUITE = (
         "duration": 6.0,
     },
     {
-        "name": "level_arc_left",
+        "name": "level_left_wheel_bias",
         "hip": "current",
         "wheel": [0.8, 1.4, 0.8, 1.4, 0.8, 1.4],
         "duration": 4.0,
