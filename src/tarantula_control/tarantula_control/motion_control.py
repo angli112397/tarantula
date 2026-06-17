@@ -1,14 +1,16 @@
-"""Classical skid-steer baseline and optional structured RL compensation.
+"""Stop-turn-drive skid-steer baseline and optional structured RL compensation.
 
-The deployable baseline is the classical mapping from ``cmd_vel`` to per-wheel
-skid-steer velocity targets. RL is intentionally limited to bounded corrections
-to the effective track scale and left/right drive scales, so it learns
-terrain/contact compensation instead of relearning planar vehicle kinematics.
+The deployable baseline first shapes normal ``cmd_vel`` input into simple
+execution primitives, then maps those primitives to per-wheel skid-steer
+velocity targets. RL is intentionally limited to bounded corrections to the
+effective track scale and left/right drive scales, so it learns terrain/contact
+compensation instead of relearning planar kinematics.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 
 import numpy as np
 
@@ -38,10 +40,22 @@ STAGE_A_OBSERVATION_LAYOUT = (
     ("susp_joint_vel", 6, "joint_states hip/arm velocities; susp_* is the legacy wire name"),
     ("wheel_joint_vel", 6, "joint_states wheel velocities"),
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
-    ("cmd_vx", 1, "commanded forward velocity"),
-    ("cmd_wz", 1, "commanded yaw rate"),
+    ("cmd_vx", 1, "shaped execution forward velocity"),
+    ("cmd_wz", 1, "shaped execution yaw rate"),
     ("prev_action", 3, "previous RL structured compensation action"),
 )
+
+
+class MotionMode(str, Enum):
+    STOP = "stop"
+    DRIVE = "drive"
+    TURN = "turn"
+    ARC = "arc"
+
+
+class CommandStrategy(str, Enum):
+    CONTINUOUS = "continuous"
+    STOP_TURN_DRIVE = "stop_turn_drive"
 
 
 @dataclass(frozen=True)
@@ -54,12 +68,15 @@ class MotionControlConfig:
     track_scale_transition_vx: float = 0.08
     track_scale_delta_limit: float = TRACK_SCALE_DELTA_LIMIT
     drive_scale_delta_limit: float = DRIVE_SCALE_DELTA_LIMIT
-    yaw_rate_kp: float = 2.0
+    yaw_rate_kp: float = 0.0
     yaw_rate_ki: float = 0.0
     yaw_integral_limit: float = 0.8
     max_wheel_accel: float = 12.0
     pure_turn_forward_bias: float = 0.0
     pure_turn_vx_deadband: float = 0.03
+    turn_enter_wz: float = 0.08
+    turn_exit_wz: float = 0.04
+    command_strategy: str = CommandStrategy.STOP_TURN_DRIVE.value
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,60 @@ class StructuredCompensation:
     track_scale_delta: float = 0.0
     left_drive_scale_delta: float = 0.0
     right_drive_scale_delta: float = 0.0
+
+
+class CommandShaper:
+    """Shape application cmd_vel into deployable motion primitives.
+
+    The shaper owns behavior policy such as stop-turn-drive. The wheel
+    controller below remains a plain skid-steer velocity mapper.
+    """
+
+    def __init__(self, config: MotionControlConfig | None = None):
+        self.config = config or MotionControlConfig()
+        self._mode = MotionMode.STOP
+
+    @property
+    def mode(self) -> MotionMode:
+        return self._mode
+
+    def update_config(self, **kwargs) -> None:
+        self.config = replace(self.config, **kwargs)
+
+    def shape(self, command: MotionCommand) -> MotionCommand:
+        strategy = CommandStrategy(str(self.config.command_strategy))
+        if strategy == CommandStrategy.CONTINUOUS:
+            return self._shape_continuous(command)
+        return self._shape_stop_turn_drive(command)
+
+    def _shape_continuous(self, command: MotionCommand) -> MotionCommand:
+        if abs(command.vx) < 1.0e-4 and abs(command.wz) < 1.0e-4:
+            self._mode = MotionMode.STOP
+        elif abs(command.vx) >= 1.0e-4 and abs(command.wz) >= self.config.turn_enter_wz:
+            self._mode = MotionMode.ARC
+        elif abs(command.wz) >= self.config.turn_enter_wz:
+            self._mode = MotionMode.TURN
+        else:
+            self._mode = MotionMode.DRIVE
+        return command
+
+    def _shape_stop_turn_drive(self, command: MotionCommand) -> MotionCommand:
+        abs_wz = abs(command.wz)
+        if self._mode == MotionMode.TURN:
+            if abs_wz <= self.config.turn_exit_wz:
+                self._mode = MotionMode.DRIVE if abs(command.vx) >= 1.0e-4 else MotionMode.STOP
+        elif abs_wz >= self.config.turn_enter_wz:
+            self._mode = MotionMode.TURN
+        elif abs(command.vx) >= 1.0e-4:
+            self._mode = MotionMode.DRIVE
+        else:
+            self._mode = MotionMode.STOP
+
+        if self._mode == MotionMode.TURN:
+            return MotionCommand(0.0, command.wz)
+        if self._mode == MotionMode.DRIVE:
+            return MotionCommand(command.vx, 0.0)
+        return MotionCommand(0.0, 0.0)
 
 
 class SkidSteerMotionController:
@@ -163,6 +234,22 @@ class SkidSteerMotionController:
             right_drive_scale_delta=float(raw[2]) * float(self.config.drive_scale_delta_limit),
         )
 
+    def _mode_gated_compensation(
+        self,
+        execution_command: MotionCommand,
+        compensation: StructuredCompensation,
+    ) -> StructuredCompensation:
+        if abs(execution_command.vx) < 1.0e-4 and abs(execution_command.wz) < 1.0e-4:
+            return StructuredCompensation()
+        track_delta = compensation.track_scale_delta if abs(execution_command.wz) >= 1.0e-4 else 0.0
+        left_delta = compensation.left_drive_scale_delta if abs(execution_command.vx) >= 1.0e-4 else 0.0
+        right_delta = compensation.right_drive_scale_delta if abs(execution_command.vx) >= 1.0e-4 else 0.0
+        return StructuredCompensation(
+            track_scale_delta=track_delta,
+            left_drive_scale_delta=left_delta,
+            right_drive_scale_delta=right_delta,
+        )
+
     def wheel_targets(
         self,
         command: MotionCommand,
@@ -172,7 +259,10 @@ class SkidSteerMotionController:
         dt: float | None = None,
     ) -> list[float]:
         effective_vx = self._effective_vx_for_turn(command)
-        compensation = self._bounded_compensation(compensation_action)
+        compensation = self._mode_gated_compensation(
+            command,
+            self._bounded_compensation(compensation_action),
+        )
         base_track_scale = self.scheduled_track_scale(command)
         track_scale = max(0.1, base_track_scale * (1.0 + compensation.track_scale_delta))
         left_scale = max(0.0, 1.0 + compensation.left_drive_scale_delta)

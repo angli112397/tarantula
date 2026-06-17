@@ -14,6 +14,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--npz-out", required=True, help="Path to write raw actor weights as .npz.")
 parser.add_argument("--max-abs-wheel-omega", type=float, default=None)
+parser.add_argument("--track-scale-delta-limit", type=float, default=None)
+parser.add_argument("--drive-scale-delta-limit", type=float, default=None)
 args = parser.parse_args()
 
 # Isaac Lab imports NOT needed -- torch only
@@ -133,6 +135,23 @@ if max_wheel is None:
     max_wheel = 6.0
 npz_data["max_abs_wheel_omega"] = np.asarray([max_wheel], dtype=np.float32)
 
+track_delta_limit = (
+    args.track_scale_delta_limit
+    if args.track_scale_delta_limit is not None
+    else _read_env_yaml_float(ckpt_path, "track_scale_delta_limit")
+)
+if track_delta_limit is None:
+    track_delta_limit = 0.30
+drive_delta_limit = (
+    args.drive_scale_delta_limit
+    if args.drive_scale_delta_limit is not None
+    else _read_env_yaml_float(ckpt_path, "drive_scale_delta_limit")
+)
+if drive_delta_limit is None:
+    drive_delta_limit = 0.20
+npz_data["track_scale_delta_limit"] = np.asarray([track_delta_limit], dtype=np.float32)
+npz_data["drive_scale_delta_limit"] = np.asarray([drive_delta_limit], dtype=np.float32)
+
 # Validate shapes
 print(f"[export] MLP shapes:")
 print(f"  mlp.0.weight: {npz_data['mlp.0.weight'].shape}  (expect [128,47])")
@@ -141,6 +160,8 @@ print(f"  mlp.2.weight: {npz_data['mlp.2.weight'].shape}  (expect [128,128])")
 print(f"  mlp.4.weight: {npz_data['mlp.4.weight'].shape}  (expect [3,128])")
 print(f"  obs mean:     {npz_data['obs_normalizer._mean'].shape}  (expect [{obs_dim}])")
 print(f"  wheel clamp:  {float(npz_data['max_abs_wheel_omega'][0])} rad/s")
+print(f"  track delta:  {float(npz_data['track_scale_delta_limit'][0])}")
+print(f"  drive delta:  {float(npz_data['drive_scale_delta_limit'][0])}")
 assert obs_dim == 47, f"Expected current Stage A obs dim 47, got {obs_dim}"
 assert action_dim == 3, f"Expected current Stage A action dim 3, got {action_dim}"
 assert npz_data["mlp.0.weight"].shape == (128, obs_dim), f"Expected (128,{obs_dim}), got {npz_data['mlp.0.weight'].shape}"

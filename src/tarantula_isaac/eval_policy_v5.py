@@ -63,14 +63,13 @@ from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
 
 SEGMENTS = [
     ("stop", 0.0, 0.0),
-    ("forward", 0.1, 0.0),
+    ("turn_left_from_drive_cmd", 0.1, 0.15),
+    ("drive_after_left", 0.1, 0.0),
+    ("turn_right_from_drive_cmd", 0.1, -0.15),
+    ("drive_after_right", 0.1, 0.0),
     ("backward", -0.1, 0.0),
-    ("turn_left", 0.0, 0.15),
-    ("turn_right", 0.0, -0.15),
     ("turn_left_authority", 0.0, 0.25),
     ("turn_right_authority", 0.0, -0.25),
-    ("arc_left", 0.1, 0.12),
-    ("arc_right", 0.1, -0.12),
     ("final_stop", 0.0, 0.0),
 ]
 
@@ -111,6 +110,8 @@ def _segment_summary(
     name: str,
     cmd_vx: float,
     cmd_wz: float,
+    target_vx: float,
+    target_wz: float,
     start_xy: torch.Tensor,
     rewards: list[torch.Tensor],
     actions: list[torch.Tensor],
@@ -140,14 +141,16 @@ def _segment_summary(
 
     vx = lin_vel_tensor[:, :, 0]
     wz = ang_vel_tensor[:, :, 2]
-    vx_err = vx - cmd_vx
-    wz_err = wz - cmd_wz
+    vx_err = vx - target_vx
+    wz_err = wz - target_wz
     final_vx = lin_vel_tensor[-1, :, 0]
     final_wz = ang_vel_tensor[-1, :, 2]
     return {
         "segment": name,
         "cmd_vx": cmd_vx,
         "cmd_wz": cmd_wz,
+        "target_vx": target_vx,
+        "target_wz": target_wz,
         "mean_displacement_m": float(displacement.mean().item()),
         "mean_reward": float(reward_tensor.mean().item()),
         "mean_vx": float(vx.mean().item()),
@@ -186,6 +189,8 @@ def main() -> None:
                 f"policy action dim {policy.action_dim} does not match current Isaac env action space {cfg.action_space}"
             )
         cfg.max_abs_wheel_omega = float(policy.max_abs_wheel_omega)
+        cfg.track_scale_delta_limit = float(policy.track_scale_delta_limit)
+        cfg.drive_scale_delta_limit = float(policy.drive_scale_delta_limit)
 
     env = TarantulaSuspensionEnv(cfg=cfg, render_mode=None)
     obs = _reset(env)
@@ -208,6 +213,9 @@ def main() -> None:
         for name, cmd_vx, cmd_wz in SEGMENTS:
             env._cmd_vx[:] = cmd_vx
             env._cmd_wz[:] = cmd_wz
+            env._update_execution_commands()
+            target_vx = float(env._exec_cmd_vx.mean().item())
+            target_wz = float(env._exec_cmd_wz.mean().item())
             start_xy = env._robot.data.root_pos_w[:, :2].detach().clone()
             rewards = []
             actions = []
@@ -256,6 +264,8 @@ def main() -> None:
                     name,
                     cmd_vx,
                     cmd_wz,
+                    target_vx,
+                    target_wz,
                     start_xy,
                     rewards,
                     actions,

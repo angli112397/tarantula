@@ -38,21 +38,25 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
 
     # action scaling: policy outputs ±1 -> bounded structured compensation
     stand_susp_target = 0.0         # rad, Stage A neutral suspension target
-    arc_track_scale = 1.0           # effective track scale for moving arcs
+    arc_track_scale = 1.0           # continuous A/B mode effective track scale
     pure_turn_track_scale = 3.0     # effective track scale for near-zero-vx turns
-    track_scale_transition_vx = 0.08  # m/s, smooth transition to arc scale
+    track_scale_transition_vx = 0.08  # m/s, continuous A/B transition threshold
+    turn_enter_wz = 0.08            # rad/s, stop-turn-drive enter threshold
+    turn_exit_wz = 0.04             # rad/s, stop-turn-drive exit threshold
     track_scale_delta_limit = 0.30  # fractional correction around base track scale
     drive_scale_delta_limit = 0.20  # fractional correction around left/right drive scale
     max_abs_wheel_omega = 6.0       # rad/s, final per-wheel velocity target limit
 
-    # driving: sample explicit command families so yaw/arc behavior is not
-    # diluted by near-zero angular commands.
+    # driving: Stage A trains the shaped stop-turn-drive baseline. Raw arc
+    # commands are disabled by default; if sampled in experiments, high-yaw
+    # raw commands are still shaped into pure turn execution.
     wheel_radius = 0.13  # m, from tarantula_common.xacro
     command_vx_range = (-0.3, 0.3)  # m/s
     command_wz_range = (-0.4, 0.4)  # rad/s
     command_stop_prob = 0.20
-    command_straight_prob = 0.25
-    command_pure_turn_prob = 0.25
+    command_straight_prob = 0.40
+    command_pure_turn_prob = 0.40
+    command_arc_prob = 0.0
     command_min_abs_vx = 0.12
     command_min_abs_wz = 0.15
     command_resampling_enabled = True
@@ -78,6 +82,7 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     reward_tracking_yaw_rate_weight = 1.2
     reward_tracking_yaw_rate_sigma = 0.12
     reward_yaw_sign_weight = 0.25
+    reward_pure_turn_drift_weight = 0.35
     reward_orientation_weight = 0.4
     reward_orientation_sigma = 0.35
     reward_ang_vel_xy_weight = 0.03

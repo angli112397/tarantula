@@ -82,6 +82,55 @@ class GazeboCmdTrackingBenchmarkTest(unittest.TestCase):
         self.assertFalse(comparison["pass"])
         self.assertIn("turn_left:stability_regression", comparison["hard_failures"])
 
+    def test_segment_summary_scores_shaped_execution_command(self):
+        samples = [
+            {
+                "segment": "turn_left_from_drive_cmd",
+                "cmd_vx": 0.1,
+                "cmd_wz": 0.15,
+                "target_vx": 0.0,
+                "target_wz": 0.15,
+                "actual_vx": 0.0,
+                "actual_wz": 0.0,
+                "x": 0.0,
+                "y": 0.0,
+                "yaw": 0.0,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "hip_pos_max_abs": 0.0,
+                "wheel_cmd_max_abs": 0.0,
+                "rl_action_saturation": 0.0,
+                "rl_enabled": 0.0,
+                "t_wall": 0.0,
+            },
+            {
+                "segment": "turn_left_from_drive_cmd",
+                "cmd_vx": 0.1,
+                "cmd_wz": 0.15,
+                "target_vx": 0.0,
+                "target_wz": 0.15,
+                "actual_vx": 0.0,
+                "actual_wz": 0.15,
+                "x": 0.0,
+                "y": 0.0,
+                "yaw": 0.15,
+                "roll": 0.0,
+                "pitch": 0.0,
+                "hip_pos_max_abs": 0.0,
+                "wheel_cmd_max_abs": 0.0,
+                "rl_action_saturation": 0.0,
+                "rl_enabled": 0.0,
+                "t_wall": 1.0,
+            },
+        ]
+
+        summary = self.benchmark.summarize_segment(samples)
+
+        self.assertEqual(summary["cmd_vx"], 0.1)
+        self.assertEqual(summary["target_vx"], 0.0)
+        self.assertAlmostEqual(summary["rms_vx_error"], 0.0)
+        self.assertFalse(summary["stuck"])
+
 
 if __name__ == "__main__":
     unittest.main()

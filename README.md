@@ -72,7 +72,7 @@ Current model baseline:
 - model: `tarantula_v2.urdf.xacro`
 - hip command interface: `/suspension_controller/joint_trajectory`
 - wheel command interface: `/wheel_velocity_controller/commands`
-- wheel collision: `cylinder`
+- wheel collision: `cylinder` for kinematic A/B; use `sphere` only when reproducing the current rough-terrain contact comparison.
 - validated GUI behavior: stable natural hip posture, clean left/right in-place turning, and stable hip posture trajectories.
 
 Launch the baseline GUI:
@@ -159,7 +159,10 @@ ROS control topics:
 - `/rl_policy/status`: diagnostic observer output from `motion_control_node`;
   data order is `enabled, track_scale_action, left_drive_action,
   right_drive_action, action_saturation, wheel_cmd_max_abs, cmd_vx, cmd_wz,
-  measured_wz`.
+  measured_wz, motion_mode_turn`. `cmd_vx/cmd_wz` are the shaped execution
+  command values. With the default `command_strategy:=stop_turn_drive`, a
+  large-yaw input executes as `vx_exec=0,wz_exec=cmd_wz`; low-yaw driving
+  executes as `vx_exec=cmd_vx,wz_exec=0`.
 
 Run the Gazebo command-tracking benchmark after launching the sim:
 
@@ -207,7 +210,8 @@ RL observation inputs in Gazebo:
 - `/imu/data`
 - `/joint_states`
 - `/ft_wheel/{fl,fr,ml,mr,rl,rr}`
-- `/cmd_vel` for runtime `cmd_vx/cmd_wz`; launch `cmd_vx/cmd_wz` are fallback defaults.
+- limited `cmd_vx/cmd_wz`; launch `cmd_vx/cmd_wz` are fallback defaults before
+  `/cmd_vel` arrives.
 
 Wheel collision A/B:
 
@@ -253,17 +257,21 @@ export PYTHONPATH="$(pwd)/src:$(pwd)/src/tarantula_control:${PYTHONPATH:-}"
 # Stage 0: easiest row only.
 python3 src/tarantula_isaac/train_v5.py \
   --num_envs 64 \
-  --max_iterations 200 \
+  --max_iterations 150 \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
   --terrain-level-min 0 \
   --terrain-level-max 0 \
   --command-profile stage0 \
   --command-resampling-time 3.0 \
-  --max-abs-wheel-omega 10.0 \
+  --max-abs-wheel-omega 6.0 \
   --track-scale-delta-limit 0.30 \
   --drive-scale-delta-limit 0.20 \
-  --entropy-coef 0.002 \
-  --action-saturation-weight 0.08
+  --entropy-coef 0.0002 \
+  --policy-init-std 0.35 \
+  --action-magnitude-weight 0.02 \
+  --action-rate-weight 0.03 \
+  --action-saturation-weight 0.50 \
+  --action-saturation-soft-limit 0.65
 
 # Stage 1/2/3: resume from the previous checkpoint and widen max level.
 python3 src/tarantula_isaac/train_v5.py \
@@ -275,15 +283,17 @@ python3 src/tarantula_isaac/train_v5.py \
   --terrain-level-max 1 \
   --command-profile mixed \
   --command-resampling-time 3.0 \
-  --max-abs-wheel-omega 10.0 \
+  --max-abs-wheel-omega 6.0 \
   --track-scale-delta-limit 0.30 \
   --drive-scale-delta-limit 0.20 \
   --entropy-coef 0.001 \
   --action-saturation-weight 0.08
 ```
 
-Use the same terrain-level arguments with `eval_policy_v5.py` when judging a
-stage checkpoint. Keep `gazebo_demo/42` and unseen `rl_curriculum` seeds as
+Stage A training samples only stop, straight/backward, and pure-turn execution
+commands. Raw high-yaw `/cmd_vel` pairs may still be present in deterministic
+checks, but the baseline shapes them into pure turn before observation, reward,
+and benchmark scoring. Keep `gazebo_demo/42` and unseen `rl_curriculum` seeds as
 holdout validation instead of training-only evidence.
 
 Export the actor:
@@ -295,9 +305,10 @@ python3 src/tarantula_isaac/export_weights_v5.py \
   --npz-out generated/policies/cmd_vel_actor.npz
 ```
 
-Exported `.npz` actors include `max_abs_wheel_omega`. Isaac eval and Gazebo
+Exported `.npz` actors include `max_abs_wheel_omega`,
+`track_scale_delta_limit`, and `drive_scale_delta_limit`. Isaac eval and Gazebo
 `motion_control_node` read that metadata so deployment uses the same wheel clamp
-as training.
+and residual action scale as training.
 
 Before judging the actor in Gazebo, run the deterministic Isaac eval on the
 same terrain:
@@ -322,10 +333,10 @@ python3 src/tarantula_isaac/eval_policy_v5.py \
   --out generated/benchmarks/isaac_eval/policy_summary.json
 ```
 
-The deterministic command sequence is intentionally low-speed for geometry and
-contact validation: `forward/backward = +/-0.10 m/s`, low-speed turn sign check
-`cmd_wz = +/-0.15 rad/s`, plus separate turn-authority checks at
-`cmd_wz = +/-0.25 rad/s`.
+The deterministic command sequence is intentionally low-speed and covers the
+deployable command surface: stop, raw high-yaw commands that shape into pure
+turns, straight driving, backward driving, and pure-turn authority checks. The
+metric target is the shaped execution command, not the raw `/cmd_vel` pair.
 
 ## Current Contracts
 
@@ -334,19 +345,26 @@ contact validation: `forward/backward = +/-0.10 m/s`, low-speed turn sign check
 - Isaac terrain importer: `SharedHeightmapTerrainImporter`.
 - Isaac reset origins are lifted to local heightmap height and kept inside a
   terrain-edge safety margin for RL.
-- Motion-control baseline: `SkidSteerMotionController` maps
-  `/cmd_vel -> calibrated skid-steer wheel targets`; the default
-  track scale schedule uses `arc_track_scale=1.0` for moving arcs and
-  `pure_turn_track_scale=3.0` for near-zero-vx turns. `yaw_rate_kp=2.0`
-  closes the loop on measured yaw rate.
-  RL is a switchable bounded structured compensation layer, not the owner of
-  basic planar kinematics.
+- Motion-control baseline is split into two layers. `CommandShaper` accepts
+  normal `/cmd_vel`; the default `command_strategy:=stop_turn_drive` turns
+  high-yaw commands into pure rotation and low-yaw commands into straight
+  drive. `command_strategy:=continuous` remains available for A/B testing.
+  `SkidSteerMotionController` then maps the shaped execution command to six
+  wheel velocity targets. `yaw_rate_kp` is default-off; measured-yaw feedback is
+  treated as an optional calibrated experiment because it can move the pure-turn
+  rotation center away from the chassis center. RL is a switchable bounded
+  structured compensation layer, not the owner of basic planar kinematics.
 - Stage A action space: 3D structured compensation:
   `track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`.
+  The action is component-gated against the shaped execution command:
+  yaw-active commands may apply `track_scale_delta`, drive-active commands may
+  apply left/right drive scale deltas, and STOP applies no RL compensation.
 - Stage A actor `.npz` files carry the final wheel clamp; do not deploy a
-  policy if metadata does not match its training run.
+  policy if metadata does not match its training run. Current actors also carry
+  the trained residual action scale for track and drive compensation.
 - Stage A observation space: 47D, including IMU, joint state, wheel velocity,
-  wheel 3D F/T force, `cmd_vx/cmd_wz`, and previous structured action.
+  wheel 3D F/T force, shaped execution `cmd_vx/cmd_wz`, and previous structured
+  action.
 - Motion-control baseline and RL compensation share
   `/wheel_velocity_controller/commands`; this is the required interface boundary
   before judging policy quality.
@@ -364,13 +382,20 @@ contact validation: `forward/backward = +/-0.10 m/s`, low-speed turn sign check
 
 ## Next Work
 
-Before serious RL runs, prove the pure classical controller in Gazebo and Isaac.
-Then train RL only as structured yaw/slip/slope/stuck compensation. The current
-Stage A sampler explicitly covers stop, straight, pure-turn, and arc commands
-so yaw tracking is a first-class training target. Run deterministic Isaac eval
-before the Gazebo command-tracking benchmark.
+Before serious RL runs, prove the classical `stop_turn_drive` skid-steer
+baseline in Gazebo and Isaac. Then train RL only as structured residual
+compensation: drive-scale residuals for forward/backward traction and
+track-scale residuals for yaw authority. Run deterministic Isaac eval before
+the Gazebo command-tracking benchmark.
 
-Immediate RL next step: train the 3D structured-compensation actor
-(`track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`) on
-staged mixed commands, and reject candidates that improve reward by saturating
-the compensation actions.
+Immediate RL next step: train the 3D structured-compensation actor on stop,
+straight/backward, and pure-turn execution commands. Reject candidates that
+improve reward by saturating the compensation actions.
+
+Stage 0 rejection gate: do not launch Gazebo unless deterministic Isaac eval
+shows lower weighted command error than open loop, no velocity terminations on
+the fixed sequence, and mean action saturation below 0.20. Failed Stage 0 runs on
+2026-06-17 showed good straight-line tracking but excessive action saturation
+and poor yaw authority in the old continuous-arc experiment. The deployable
+baseline now handles that by shape-first stop-turn-drive, matching Nav2
+rotation-shim style behavior.

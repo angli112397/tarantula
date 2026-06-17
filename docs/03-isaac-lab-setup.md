@@ -46,6 +46,10 @@ NUM_ENVS=2 scripts/run_ppo_train_v5.sh \
   --command-profile stage0
 ```
 
+Stage A trains against the same stop-turn-drive execution command used in
+Gazebo. Raw `/cmd_vel` samples are shaped before observation, reward, and eval
+metrics.
+
 Stage A training logs must include `Episode_Reward/*`,
 `Episode_Termination/*`, and `Episode_Metric/*`. The metric group mirrors the
 Gazebo command-tracking benchmark: command tracking error, roll/pitch,
@@ -84,5 +88,5 @@ python3 src/tarantula_isaac/eval_policy_v5.py \
 ```
 
 Reject a policy before Gazebo if Isaac eval shows immediate spawn termination,
-near-zero commanded displacement, large command-tracking error, or persistent
-action saturation.
+near-zero displacement on drive segments, large shaped-command tracking error,
+or persistent action saturation.

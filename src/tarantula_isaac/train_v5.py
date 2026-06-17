@@ -23,7 +23,7 @@ parser.add_argument(
     "--command-profile",
     choices=("mixed", "yaw_only", "stage0"),
     default="mixed",
-    help="Command curriculum profile. stage0 uses easiest command magnitudes; yaw_only samples pure turns only.",
+    help="Command curriculum profile. stage0 uses easiest stop/drive/turn magnitudes; yaw_only samples pure turns only.",
 )
 parser.add_argument(
     "--command-resampling-time",
@@ -60,6 +60,48 @@ parser.add_argument(
     type=float,
     default=None,
     help="Override action saturation penalty weight.",
+)
+parser.add_argument(
+    "--tracking-yaw-rate-weight",
+    type=float,
+    default=None,
+    help="Override yaw-rate tracking reward weight.",
+)
+parser.add_argument(
+    "--yaw-sign-weight",
+    type=float,
+    default=None,
+    help="Override yaw direction reward weight.",
+)
+parser.add_argument(
+    "--pure-turn-drift-weight",
+    type=float,
+    default=None,
+    help="Override pure-turn planar drift penalty weight.",
+)
+parser.add_argument(
+    "--action-saturation-soft-limit",
+    type=float,
+    default=None,
+    help="Override normalized action soft saturation threshold.",
+)
+parser.add_argument(
+    "--action-magnitude-weight",
+    type=float,
+    default=None,
+    help="Override action magnitude penalty weight.",
+)
+parser.add_argument(
+    "--action-rate-weight",
+    type=float,
+    default=None,
+    help="Override action rate penalty weight.",
+)
+parser.add_argument(
+    "--policy-init-std",
+    type=float,
+    default=None,
+    help="Override PPO actor Gaussian initial std. Residual policies should start with small exploration.",
 )
 parser.add_argument(
     "--terrain-dir",
@@ -132,18 +174,32 @@ def main():
         env_cfg.max_abs_wheel_omega = float(args.max_abs_wheel_omega)
     if args.action_saturation_weight is not None:
         env_cfg.reward_action_saturation_weight = float(args.action_saturation_weight)
+    if args.tracking_yaw_rate_weight is not None:
+        env_cfg.reward_tracking_yaw_rate_weight = float(args.tracking_yaw_rate_weight)
+    if args.yaw_sign_weight is not None:
+        env_cfg.reward_yaw_sign_weight = float(args.yaw_sign_weight)
+    if args.pure_turn_drift_weight is not None:
+        env_cfg.reward_pure_turn_drift_weight = float(args.pure_turn_drift_weight)
+    if args.action_saturation_soft_limit is not None:
+        env_cfg.action_saturation_soft_limit = float(args.action_saturation_soft_limit)
+    if args.action_magnitude_weight is not None:
+        env_cfg.reward_action_magnitude_weight = float(args.action_magnitude_weight)
+    if args.action_rate_weight is not None:
+        env_cfg.reward_action_rate_weight = float(args.action_rate_weight)
     if args.command_resampling_time is not None:
         env_cfg.command_resampling_time_s = float(args.command_resampling_time)
     if args.command_profile == "yaw_only":
         env_cfg.command_stop_prob = 0.0
         env_cfg.command_straight_prob = 0.0
         env_cfg.command_pure_turn_prob = 1.0
+        env_cfg.command_arc_prob = 0.0
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_wz = 0.25
     elif args.command_profile == "stage0":
         env_cfg.command_stop_prob = 0.20
-        env_cfg.command_straight_prob = 0.35
-        env_cfg.command_pure_turn_prob = 0.30
+        env_cfg.command_straight_prob = 0.40
+        env_cfg.command_pure_turn_prob = 0.40
+        env_cfg.command_arc_prob = 0.0
         env_cfg.command_vx_range = (-0.16, 0.16)
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_vx = 0.08
@@ -157,6 +213,8 @@ def main():
         agent_cfg.save_interval = 1
     if args.entropy_coef is not None:
         agent_cfg.algorithm.entropy_coef = float(args.entropy_coef)
+    if args.policy_init_std is not None:
+        agent_cfg.actor.distribution_cfg.init_std = float(args.policy_init_std)
     agent_cfg.device = "cuda:0"
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _RSL_RL_VERSION)
 

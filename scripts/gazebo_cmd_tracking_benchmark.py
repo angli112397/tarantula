@@ -11,7 +11,8 @@ Prerequisite: start Gazebo with the RL policy path, for example:
     spawn_z:=0.55
 
 The benchmark publishes a fixed /cmd_vel sequence, samples Gazebo truth pose via
-`ign model -m tarantula -p`, and records command tracking metrics.
+`ign model -m tarantula -p`, and records command tracking metrics against the
+shaped execution command reported by /rl_policy/status.
 """
 
 from __future__ import annotations
@@ -44,14 +45,13 @@ except ModuleNotFoundError:
 
 DEFAULT_SEQUENCE = [
     ("stop", 0.0, 0.0),
-    ("forward", 0.1, 0.0),
+    ("turn_left_from_drive_cmd", 0.1, 0.15),
+    ("drive_after_left", 0.1, 0.0),
+    ("turn_right_from_drive_cmd", 0.1, -0.15),
+    ("drive_after_right", 0.1, 0.0),
     ("backward", -0.1, 0.0),
-    ("turn_left", 0.0, 0.15),
-    ("turn_right", 0.0, -0.15),
     ("turn_left_authority", 0.0, 0.25),
     ("turn_right_authority", 0.0, -0.25),
-    ("arc_left", 0.1, 0.12),
-    ("arc_right", 0.1, -0.12),
     ("final_stop", 0.0, 0.0),
 ]
 
@@ -76,6 +76,7 @@ STATUS_LAYOUT = (
     "status_cmd_vx",
     "status_cmd_wz",
     "measured_wz",
+    "motion_mode_turn",
 )
 
 NOMINAL_WHEEL_LOAD_N = 23.1 * 9.81 / 6.0
@@ -271,6 +272,8 @@ def sample_loop(
             "segment": segment_name,
             "cmd_vx": cmd_vx,
             "cmd_wz": cmd_wz,
+            "target_vx": status.get("status_cmd_vx", cmd_vx),
+            "target_wz": status.get("status_cmd_wz", cmd_wz),
             "x": pose.x,
             "y": pose.y,
             "z": pose.z,
@@ -279,8 +282,8 @@ def sample_loop(
             "yaw": pose.yaw,
             "actual_vx": vx,
             "actual_wz": wz,
-            "vx_error": vx - cmd_vx,
-            "wz_error": wz - cmd_wz,
+            "vx_error": vx - status.get("status_cmd_vx", cmd_vx),
+            "wz_error": wz - status.get("status_cmd_wz", cmd_wz),
             "wheel_cmd_max_abs": max((abs(v) for v in wheel_cmd_by_leg.values()), default=0.0),
             "hip_pos_max_abs": max((abs(v) for v in hip_pos_by_leg.values()), default=0.0),
         }
@@ -304,12 +307,16 @@ def summarize_segment(samples: list[dict]) -> dict:
     usable = samples[1:]
     cmd_vx = float(usable[0]["cmd_vx"])
     cmd_wz = float(usable[0]["cmd_wz"])
+    target_vx_values = [sample_value(s, "target_vx") for s in usable]
+    target_wz_values = [sample_value(s, "target_wz") for s in usable]
+    target_vx = mean(target_vx_values)
+    target_wz = mean(target_wz_values)
     start = samples[0]
     end = samples[-1]
     mean_vx = sum(float(s["actual_vx"]) for s in usable) / len(usable)
     mean_wz = sum(float(s["actual_wz"]) for s in usable) / len(usable)
-    vx_errors = [float(s["actual_vx"]) - cmd_vx for s in usable]
-    wz_errors = [float(s["actual_wz"]) - cmd_wz for s in usable]
+    vx_errors = [float(s["actual_vx"]) - sample_value(s, "target_vx") for s in usable]
+    wz_errors = [float(s["actual_wz"]) - sample_value(s, "target_wz") for s in usable]
     rms_vx_error = rms(vx_errors)
     rms_wz_error = rms(wz_errors)
     max_roll = max(abs(float(s["roll"])) for s in usable)
@@ -341,16 +348,18 @@ def summarize_segment(samples: list[dict]) -> dict:
     displacement = math.hypot(float(end["x"]) - float(start["x"]), float(end["y"]) - float(start["y"]))
     yaw_delta = wrap_angle(float(end["yaw"]) - float(start["yaw"]))
     direction_mismatch = (
-        (cmd_vx > 0.05 and mean_vx < -0.02)
-        or (cmd_vx < -0.05 and mean_vx > 0.02)
-        or (cmd_wz > 0.05 and mean_wz < -0.02)
-        or (cmd_wz < -0.05 and mean_wz > 0.02)
+        (target_vx > 0.05 and mean_vx < -0.02)
+        or (target_vx < -0.05 and mean_vx > 0.02)
+        or (target_wz > 0.05 and mean_wz < -0.02)
+        or (target_wz < -0.05 and mean_wz > 0.02)
     )
-    stuck = abs(cmd_vx) > 0.05 and displacement < 0.03
+    stuck = abs(target_vx) > 0.05 and displacement < 0.03
     return {
         "segment": str(usable[0]["segment"]),
         "cmd_vx": cmd_vx,
         "cmd_wz": cmd_wz,
+        "target_vx": target_vx,
+        "target_wz": target_wz,
         "mean_vx": mean_vx,
         "mean_wz": mean_wz,
         "rms_vx_error": rms_vx_error,

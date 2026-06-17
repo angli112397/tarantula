@@ -13,7 +13,7 @@ tarantula_terrain.generate
   -> generated/terrains/flat_smoke/42 and gazebo_demo/42
   -> tarantula_v2.urdf.xacro
   -> Gazebo direct hip/wheel GUI acceptance
-  -> classical skid-steer motion controller
+  -> stop-turn-drive command shaper + classical skid-steer wheel mapper
   -> tarantula_isaac.SharedHeightmapTerrainImporter
   -> train_v5.py staged structured-compensation RL
   -> export_weights_v5.py actor .npz
@@ -21,8 +21,9 @@ tarantula_terrain.generate
 ```
 
 当前目标是让 Gazebo、Isaac Lab、RL I/O、模型参数和文档保持同一个 baseline。
-主运动控制必须是可解释、可单测的传统 skid-steer controller；RL 只作为可关闭的
-bounded structured compensation，用于复杂地形下的 yaw/slip/slope/stuck 修正。
+主运动控制必须是可解释、可单测的 stop-turn-drive 传统 skid-steer baseline；
+RL 只作为可关闭的 bounded structured compensation，用于复杂地形下的
+yaw/slip/slope/stuck 修正。
 
 当前开发纪律：
 
@@ -131,12 +132,17 @@ Direct Gazebo acceptance path:
 Controller path:
 
 - launch with `motion_control:=true start_motion_control:=true rl_compensation_enabled:=false`;
-- `tarantula_control.motion_control.SkidSteerMotionController` is the
-  baseline controller: `/cmd_vel -> six wheel velocities`;
-- the baseline is calibrated skid-steer, not pure ideal differential drive:
-  `arc_track_scale=1.0` is the moving-arc baseline,
-  `pure_turn_track_scale=3.0` is the near-zero-vx turn baseline, and IMU
-  yaw-rate feedback corrects residual yaw error;
+- `tarantula_control.motion_control.CommandShaper` is the application-facing
+  baseline policy: default `command_strategy:=stop_turn_drive` shapes high-yaw
+  `/cmd_vel` into pure turn execution and low-yaw commands into straight drive;
+- `tarantula_control.motion_control.SkidSteerMotionController` is the wheel
+  mapper: shaped execution command -> six wheel velocities;
+- the wheel mapper is calibrated skid-steer, not pure ideal differential drive:
+  `pure_turn_track_scale=3.0` is the pure-turn baseline and `arc_track_scale=1.0`
+  is retained only for `command_strategy:=continuous` A/B tests;
+- `yaw_rate_kp=0.0` by default. IMU yaw-rate feedback is an optional calibration
+  experiment, not part of the frozen baseline, because it can move the pure-turn
+  rotation center away from the chassis center;
 - `motion_control_node` is only the ROS I/O wrapper around that controller;
 - hip posture is owned by the v2 `JointTrajectoryController`; Stage A does not
   send hip residual commands.
@@ -148,7 +154,7 @@ Controller path:
   - `/suspension_controller/joint_trajectory`
   - launch with `motion_control:=true start_motion_control:=true rl_compensation_enabled:=true`;
   - `rl_compensation_enabled:=false` runs the same motion node without policy weights;
-  - Stage A final wheel command is always the scheduled motion-control baseline
+  - Stage A final wheel command is always the shaped motion-control baseline
     plus bounded structured compensation.
 - legacy Gazebo effort-hold, wheel contact lab, and fixed-hip diagnostic paths
   have been removed. Use the v2 direct acceptance script as the baseline gate.
@@ -178,15 +184,17 @@ The deployable controller is layered:
 ```text
 /cmd_vel
   -> command limiter
+  -> CommandShaper stop/drive/turn execution command
   -> classical skid-steer wheel target
   -> optional RL structured compensation
   -> final /wheel_velocity_controller/commands
 ```
 
-The classical skid-steer controller is the baseline and source of truth for
-normal planar motion. It must
-work without RL and must pass Gazebo/Isaac open-loop command tracking before any
-policy is judged.
+The stop-turn-drive + classical skid-steer chain is the baseline and source of
+truth for normal planar motion. It must work without RL and must pass
+Gazebo/Isaac open-loop command tracking before any policy is judged. Continuous
+low-speed arcs are an A/B diagnostic, not a baseline gate; upper Navi is
+expected to correct heading by issuing turn/drive primitives.
 
 The RL compensation layer is only allowed to output bounded structured
 skid-steer corrections. Its intended roles are:
@@ -228,10 +236,14 @@ action[1] = left_drive_scale_delta, bounded by +/-0.20
 action[2] = right_drive_scale_delta, bounded by +/-0.20
 
 effective_track = calibrated_track * (1 + track_scale_delta)
-left_wheel      = skid_steer_left(cmd_vx, cmd_wz, effective_track) * (1 + left_drive_scale_delta)
-right_wheel     = skid_steer_right(cmd_vx, cmd_wz, effective_track) * (1 + right_drive_scale_delta)
+left_wheel      = skid_steer_left(exec_vx, exec_wz, effective_track) * (1 + left_drive_scale_delta)
+right_wheel     = skid_steer_right(exec_vx, exec_wz, effective_track) * (1 + right_drive_scale_delta)
 wheel_target    = clamp([left,right,left,right,left,right], -6.0, 6.0) rad/s
 ```
+
+The action is gated by execution mode: yaw-active commands may use
+`track_scale_delta`, drive-active commands may use left/right drive deltas, and
+STOP uses zero compensation.
 
 Stage A observation space: 47D.
 
@@ -242,8 +254,8 @@ susp_joint_pos(6)
 susp_joint_vel(6)
 wheel_joint_vel(6)
 wheel_force_b(18)
-cmd_vx(1)
-cmd_wz(1)
+exec_cmd_vx(1)
+exec_cmd_wz(1)
 prev_action(3)
 ```
 
@@ -258,6 +270,7 @@ does not include simulator root linear velocity. Optional `truth_odom:=true` pub
 not consumed by `motion_control_node` or any deployable control algorithm.
 Runtime command input is `/cmd_vel` (`linear.x`, `angular.z`); launch
 `cmd_vx/cmd_wz` are fallback defaults when no upstream command source is running.
+The actor observes the shaped execution command, not the raw `/cmd_vel` pair.
 
 Motion-compensation dimension coverage:
 
@@ -325,22 +338,24 @@ Reward baseline follows the trimmed rough-terrain locomotion pattern used by leg
 ```
 
 Stage A command sampling is intentionally not uniform random over a continuous
-box. During training, each environment periodically resamples one of four
-command families so yaw does not disappear into near-zero angular commands and
-one episode is not dominated by a single easy command:
+box. During training, each environment periodically resamples one of three
+baseline command families so yaw does not disappear into near-zero angular
+commands and one episode is not dominated by a single easy command:
 
 ```text
 20% stop
-25% straight forward/backward
-25% pure turn left/right
-30% arc turn
+40% straight forward/backward
+40% pure turn left/right
 ```
 
-Straight and arc commands use `|cmd_vx| >= 0.12 m/s`. Pure-turn and arc
-commands use `|cmd_wz| >= 0.15 rad/s`. Left/right and forward/backward signs
-are sampled symmetrically. The `stage0` command profile narrows these ranges
-for the first terrain row; fixed Isaac evaluation and yaw-authority sweeps
-disable command resampling and set deterministic segment commands.
+Straight commands use `|cmd_vx| >= 0.12 m/s`. Pure-turn commands use
+`|cmd_wz| >= 0.15 rad/s`. Left/right and forward/backward signs are sampled
+symmetrically. Raw arc sampling is disabled in the baseline. If an experiment
+samples a raw `vx+wz` command, stop-turn-drive shapes high-yaw commands into
+pure-turn execution before observation, reward, and benchmark scoring. The
+`stage0` command profile narrows these ranges for the first terrain row; fixed
+Isaac evaluation and yaw-authority sweeps disable command resampling and set
+deterministic segment commands.
 
 Wheel-load balance is not part of the Stage A reward. It remains an observation
 and diagnostic metric; adding it to reward is deferred until the vehicle can
@@ -373,10 +388,10 @@ Deterministic Isaac evaluation is mandatory before Gazebo deployment. Run
 
 - `--mode open_loop` to establish the analytic wheel-speed baseline inside Isaac;
 - `--mode npz --policy-npz <actor.npz>` to evaluate the exported policy;
-- fixed low-speed `cmd_vx/cmd_wz` segments: stop, forward/backward
-  (`+/-0.10 m/s`), low-speed left/right turn sign checks
-  (`+/-0.15 rad/s`), separate turn-authority checks (`+/-0.25 rad/s`),
-  left/right arc (`0.10 m/s`, `+/-0.12 rad/s`), final stop.
+- fixed low-speed raw `cmd_vx/cmd_wz` segments: stop, high-yaw raw commands
+  that shape into pure turn, forward/backward (`+/-0.10 m/s`), separate
+  turn-authority checks (`+/-0.25 rad/s`), final stop. Metrics are computed
+  against the shaped execution target (`target_vx/target_wz`).
 
 Traditional skid-steer sign convention:
 
@@ -423,7 +438,7 @@ until the gate passes.
 | Ring | Scope | Change budget | Gate |
 | --- | --- | --- | --- |
 | 0 | Gazebo direct model baseline | v2 geometry, hip trajectory, wheel contact only | `turn-only` and `posture-only` GUI/script tests pass |
-| 1 | Classical motion baseline | `/cmd_vel -> six wheel velocities`, no RL | Gazebo command tracking passes low-speed straight, reverse, pure turns, arcs |
+| 1 | Classical motion baseline | `/cmd_vel -> shaped execution -> six wheel velocities`, no RL | Gazebo command tracking passes stop, straight/reverse, pure turns, and shaped high-yaw commands |
 | 2 | Isaac open-loop parity | same terrain and model parameters | Isaac open-loop segment metrics agree with Gazebo direction/sign/order |
 | 3 | Stage A structured RL | track scale and left/right drive scale only | deterministic Isaac eval beats open-loop without high action edge-rate |
 | 4 | Gazebo structured deployment | exported `.npz` only | Gazebo benchmark improves or preserves classical baseline |
@@ -443,10 +458,10 @@ Immediate rules:
    0 or Ring 1 fails, fix model/control before training.
 5. Do not split every symptom into a separate investigation. Use the ring gate:
    one failing gate means inspect only the layer owned by that gate.
-6. Keep `arc_track_scale=1.0` and `pure_turn_track_scale=3.0` as the calibrated
-   classical expectations and let RL adjust only bounded `track_scale_delta` and
-   left/right drive deltas. Reject policies with high action edge-rate even if
-   reward improves.
+6. Keep `command_strategy:=stop_turn_drive`, `yaw_rate_kp=0.0`, and
+   `pure_turn_track_scale=3.0` as the calibrated classical expectation. Let RL
+   adjust only bounded `track_scale_delta` and left/right drive deltas. Reject
+   policies with high action edge-rate even if reward improves.
 7. Run deterministic Isaac eval in `open_loop` and `npz` modes before Gazebo RL
    deployment.
 8. Use `/rl_policy/status` and `gazebo_cmd_tracking_benchmark.py compare` before

@@ -2,8 +2,8 @@
 
 This script answers whether the current wheel model and structured-compensation
 envelope can physically produce commanded yaw before spending more PPO time.
-It runs pure-turn open-loop trials with configurable track-scale corrections
-and wheel limits.
+It runs open-loop trials with configurable track-scale and left/right drive
+corrections.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ parser.add_argument("--cmd-wz", default="0.25", help="Comma-separated yaw comman
 parser.add_argument("--cmd-vx", type=float, default=0.0, help="Forward velocity during yaw trials.")
 parser.add_argument("--max-wheel-omegas", default="6.0,8.0,10.0")
 parser.add_argument("--track-actions", default="0.0,0.5,1.0")
+parser.add_argument("--left-drive-actions", default="0.0")
+parser.add_argument("--right-drive-actions", default="0.0")
 parser.add_argument("--out", default=str(DEFAULT_OUT))
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
@@ -59,11 +61,15 @@ def _reset(env: TarantulaSuspensionEnv) -> dict[str, torch.Tensor]:
 
 def _open_loop_action(
     track_action: float,
+    left_drive_action: float,
+    right_drive_action: float,
     num_envs: int,
     device: str,
 ) -> torch.Tensor:
     action = torch.zeros(3, dtype=torch.float32, device=device)
     action[0] = max(-1.0, min(1.0, float(track_action)))
+    action[1] = max(-1.0, min(1.0, float(left_drive_action)))
+    action[2] = max(-1.0, min(1.0, float(right_drive_action)))
     return action.repeat(num_envs, 1)
 
 
@@ -72,9 +78,13 @@ def _structured_wheel_target(
     cmd_vx: float,
     cmd_wz: float,
     track_action: float,
+    left_drive_action: float,
+    right_drive_action: float,
     max_wheel_omega: float,
 ) -> list[float]:
     track_delta = max(-1.0, min(1.0, float(track_action))) * float(cfg.track_scale_delta_limit)
+    left_delta = max(-1.0, min(1.0, float(left_drive_action))) * float(cfg.drive_scale_delta_limit)
+    right_delta = max(-1.0, min(1.0, float(right_drive_action))) * float(cfg.drive_scale_delta_limit)
     vx_fraction = min(abs(cmd_vx) / max(float(cfg.track_scale_transition_vx), 1.0e-6), 1.0)
     if abs(cmd_wz) < 1.0e-4:
         base_track_scale = float(cfg.arc_track_scale)
@@ -84,8 +94,8 @@ def _structured_wheel_target(
             + float(cfg.pure_turn_track_scale) * (1.0 - vx_fraction)
         )
     turn_track = EFFECTIVE_TRACK * base_track_scale * (1.0 + track_delta)
-    left = (cmd_vx - 0.5 * turn_track * cmd_wz) / WHEEL_RADIUS
-    right = (cmd_vx + 0.5 * turn_track * cmd_wz) / WHEEL_RADIUS
+    left = (cmd_vx - 0.5 * turn_track * cmd_wz) * (1.0 + left_delta) / WHEEL_RADIUS
+    right = (cmd_vx + 0.5 * turn_track * cmd_wz) * (1.0 + right_delta) / WHEEL_RADIUS
     direction = [WHEEL_DIRECTION[leg] for leg in LEGS]
     raw = [left, right, left, right, left, right]
     return [max(-max_wheel_omega, min(max_wheel_omega, raw[i] * direction[i])) for i in range(6)]
@@ -102,6 +112,8 @@ def _run_trial(
     cmd_wz: float,
     max_wheel_omega: float,
     track_action: float,
+    left_drive_action: float,
+    right_drive_action: float,
     steps: int,
 ) -> dict:
     env.cfg.max_abs_wheel_omega = float(max_wheel_omega)
@@ -110,7 +122,7 @@ def _run_trial(
 
     env._cmd_vx[:] = cmd_vx
     env._cmd_wz[:] = cmd_wz
-    action = _open_loop_action(track_action, env.num_envs, env.device)
+    action = _open_loop_action(track_action, left_drive_action, right_drive_action, env.num_envs, env.device)
     wz_samples = []
     vx_samples = []
     roll_samples = []
@@ -144,13 +156,25 @@ def _run_trial(
     roll = torch.stack(roll_samples)
     pitch = torch.stack(pitch_samples)
     target = torch.full_like(wz, cmd_wz)
-    final_target = _structured_wheel_target(env.cfg, cmd_vx, cmd_wz, track_action, max_wheel_omega)
+    final_target = _structured_wheel_target(
+        env.cfg,
+        cmd_vx,
+        cmd_wz,
+        track_action,
+        left_drive_action,
+        right_drive_action,
+        max_wheel_omega,
+    )
     return {
         "cmd_vx": cmd_vx,
         "cmd_wz": cmd_wz,
         "max_abs_wheel_omega": max_wheel_omega,
         "track_action": track_action,
+        "left_drive_action": left_drive_action,
+        "right_drive_action": right_drive_action,
         "track_scale_delta": track_action * env.cfg.track_scale_delta_limit,
+        "left_drive_scale_delta": left_drive_action * env.cfg.drive_scale_delta_limit,
+        "right_drive_scale_delta": right_drive_action * env.cfg.drive_scale_delta_limit,
         "action_saturation_rate": float((torch.abs(action) > 0.98).float().mean().item()),
         "final_wheel_targets": [float(v) for v in final_target],
         "mean_vx": float(vx.mean().item()),
@@ -183,6 +207,8 @@ def main() -> None:
     cmd_wz_values = _parse_floats(args.cmd_wz)
     max_wheel_omegas = _parse_floats(args.max_wheel_omegas)
     track_actions = _parse_floats(args.track_actions)
+    left_drive_actions = _parse_floats(args.left_drive_actions)
+    right_drive_actions = _parse_floats(args.right_drive_actions)
     dt = float(cfg.sim.dt) * float(cfg.decimation)
     steps = max(1, int(round(args.duration / dt)))
 
@@ -192,16 +218,20 @@ def main() -> None:
             cmd_wz = direction * abs(cmd_wz_mag)
             for max_wheel_omega in max_wheel_omegas:
                 for track_action in track_actions:
-                    trials.append(
-                        _run_trial(
-                            env,
-                            cmd_vx=args.cmd_vx,
-                            cmd_wz=cmd_wz,
-                            max_wheel_omega=max_wheel_omega,
-                            track_action=track_action,
-                            steps=steps,
+                    for left_drive_action in left_drive_actions:
+                        for right_drive_action in right_drive_actions:
+                            trials.append(
+                                _run_trial(
+                                    env,
+                                    cmd_vx=args.cmd_vx,
+                                    cmd_wz=cmd_wz,
+                                    max_wheel_omega=max_wheel_omega,
+                                    track_action=track_action,
+                                    left_drive_action=left_drive_action,
+                                    right_drive_action=right_drive_action,
+                                    steps=steps,
+                                )
                         )
-                    )
 
     summary = {
         "terrain_dir": args.terrain_dir,

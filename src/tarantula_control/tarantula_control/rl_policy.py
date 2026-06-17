@@ -38,6 +38,12 @@ class RLWheelCompensationPolicy:
         self.obs_dim = int(self.w0.shape[1])
         self.action_dim = int(self.w4.shape[0])
         self.max_abs_wheel_omega = float(npz["max_abs_wheel_omega"][0]) if "max_abs_wheel_omega" in npz else 6.0
+        self.track_scale_delta_limit = (
+            float(npz["track_scale_delta_limit"][0]) if "track_scale_delta_limit" in npz else 0.30
+        )
+        self.drive_scale_delta_limit = (
+            float(npz["drive_scale_delta_limit"][0]) if "drive_scale_delta_limit" in npz else 0.20
+        )
         if self.obs_mean.shape[0] != self.obs_dim:
             raise ValueError(f"obs normalizer has {self.obs_mean.shape[0]} dims, actor expects {self.obs_dim}")
         if self.obs_dim != 47:
