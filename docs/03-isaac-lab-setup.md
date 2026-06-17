@@ -40,8 +40,16 @@ scripts/isaac_geometry_check.sh
 ```bash
 NUM_ENVS=2 scripts/run_ppo_train_v5.sh \
   --max_iterations 1 \
-  --terrain-dir "$(pwd)/generated/terrains/gazebo_demo/42"
+  --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
+  --terrain-level-min 0 \
+  --terrain-level-max 0 \
+  --command-profile stage0
 ```
+
+Stage A training logs must include `Episode_Reward/*`,
+`Episode_Termination/*`, and `Episode_Metric/*`. The metric group mirrors the
+Gazebo command-tracking benchmark: command tracking error, roll/pitch,
+action saturation, and wheel-target saturation.
 
 ## Export
 

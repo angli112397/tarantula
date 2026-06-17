@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# M7 v5 PPO training - Stage A structured compensation from scratch (obs=47, action=3)
-# Usage: bash scripts/run_ppo_train_v5.sh [--resume /path/to/checkpoint]
-set -uo pipefail
+# Stage A PPO training - structured wheel compensation (obs=47, action=3)
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ISAAC_VENV="${ISAAC_VENV:-/home/ang/isaac_venv}"
 TRAIN_PY="${REPO_ROOT}/src/tarantula_isaac/train_v5.py"
 
 NUM_ENVS="${NUM_ENVS:-64}"
-EXTRA_ARGS="${@}"
-
 LOG=/tmp/tarantula_ppo_v5.log
 LIMIT_KB=$((12*1024*1024))  # 12 GB RSS watchdog
 
-echo "=== Tarantula v5 PPO Training (Stage A, from scratch) ==="
+echo "=== Tarantula PPO Training (Stage A structured compensation) ==="
 echo "    num_envs=${NUM_ENVS}, log=${LOG}"
-echo "    extra_args: ${EXTRA_ARGS}"
+echo "    extra_args: $*"
 
 source "$ISAAC_VENV/bin/activate"
 export OMNI_KIT_ACCEPT_EULA=Y
@@ -23,8 +20,8 @@ export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}/src/tarantula_control:${PYTHONP
 
 python3 -u "$TRAIN_PY" \
   --num_envs "$NUM_ENVS" \
-  $EXTRA_ARGS \
-  2>&1 | tee "$LOG" &
+  "$@" \
+  > "$LOG" 2>&1 &
 PID=$!
 
 echo "Training PID=$PID, watching RSS..."
@@ -39,9 +36,9 @@ for i in $(seq 1 3600); do
   fi
   # Print last reward line every 60s
   if (( i % 12 == 0 )); then
-    tail -n5 "$LOG" | grep -E "Iteration|Mean reward|reward" | tail -1 || true
+    tail -n8 "$LOG" | grep -E "Iteration|Mean reward|reward|Episode_Metric" | tail -1 || true
   fi
 done
 
-wait $PID 2>/dev/null || true
+wait $PID
 echo "=== Training done. Log: $LOG ==="

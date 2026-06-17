@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M7 v5 Isaac Lab env smoke test
+# Stage A Isaac Lab environment smoke test
 # Verifies: obs.shape==(N,47), action_space.shape==(N,3), wheel-force sensor alive, no NaN
 # Usage: bash scripts/run_rl_env_smoke_v5.sh
 set -euo pipefail
@@ -22,6 +22,8 @@ launcher = AppLauncher({"headless": True, "enable_cameras": False})
 sim_app = launcher.app
 
 import torch
+from isaacsim.core.utils.extensions import enable_extension
+enable_extension("isaacsim.asset.importer.urdf")
 # Now Kit is live, safe to import isaaclab sub-modules
 from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
 from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
@@ -29,6 +31,7 @@ from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
 cfg = TarantulaSuspensionEnvCfg()
 cfg.scene.num_envs = 16
 cfg.scene.env_spacing = 4.0
+cfg.command_resampling_enabled = False
 
 print(f"[smoke] Creating env (num_envs={cfg.scene.num_envs})...")
 env = TarantulaSuspensionEnv(cfg=cfg)
@@ -43,6 +46,9 @@ for key in (
     "Episode_Reward/total",
     "Episode_Reward/tracking_lin_vel",
     "Episode_Reward/tracking_yaw_rate",
+    "Episode_Metric/vx_error_rms",
+    "Episode_Metric/wz_error_rms",
+    "Episode_Metric/action_saturation_rate",
     "Episode_Termination/tilt",
     "Episode_Termination/time_out",
 ):

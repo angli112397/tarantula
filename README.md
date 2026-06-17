@@ -156,6 +156,40 @@ ROS control topics:
 - `/suspension_controller/joint_trajectory`: six hip position targets in `fl/fr/ml/mr/rl/rr` order.
 - `/wheel_velocity_controller/commands`: six wheel velocity targets in `fl/fr/ml/mr/rl/rr` order.
 - `/cmd_vel`: application command input consumed by `motion_control_node`.
+- `/rl_policy/status`: diagnostic observer output from `motion_control_node`;
+  data order is `enabled, track_scale_action, left_drive_action,
+  right_drive_action, action_saturation, wheel_cmd_max_abs, cmd_vx, cmd_wz,
+  measured_wz`.
+
+Run the Gazebo command-tracking benchmark after launching the sim:
+
+```bash
+# Classical baseline run.
+scripts/gazebo_cmd_tracking_benchmark.py \
+  --label classical \
+  --duration 4.0 \
+  --settle 1.0 \
+  --rate 5 \
+  --out-dir generated/benchmarks/cmd_tracking/classical
+
+# RL-compensated run, launched separately with rl_compensation_enabled:=true.
+scripts/gazebo_cmd_tracking_benchmark.py \
+  --label rl \
+  --duration 4.0 \
+  --settle 1.0 \
+  --rate 5 \
+  --out-dir generated/benchmarks/cmd_tracking/rl
+
+# Offline A/B report.
+scripts/gazebo_cmd_tracking_benchmark.py compare \
+  --baseline generated/benchmarks/cmd_tracking/classical \
+  --candidate generated/benchmarks/cmd_tracking/rl \
+  --out generated/benchmarks/cmd_tracking/compare.json
+```
+
+The benchmark writes `samples.csv` and `summary.json`. Truth pose is used only
+for evaluation. Controller inputs remain `/cmd_vel`, IMU, joint state, and
+wheel F/T.
 
 Debugging order:
 
@@ -204,7 +238,10 @@ Run a lightweight PPO smoke training:
 ```bash
 NUM_ENVS=2 scripts/run_ppo_train_v5.sh \
   --max_iterations 1 \
-  --terrain-dir "$(pwd)/generated/terrains/gazebo_demo/42"
+  --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
+  --terrain-level-min 0 \
+  --terrain-level-max 0 \
+  --command-profile stage0
 ```
 
 Train on staged terrain difficulty batches using the `rl_curriculum` heightmap:
@@ -220,6 +257,8 @@ python3 src/tarantula_isaac/train_v5.py \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
   --terrain-level-min 0 \
   --terrain-level-max 0 \
+  --command-profile stage0 \
+  --command-resampling-time 3.0 \
   --max-abs-wheel-omega 10.0 \
   --track-scale-delta-limit 0.30 \
   --drive-scale-delta-limit 0.20 \
@@ -234,6 +273,8 @@ python3 src/tarantula_isaac/train_v5.py \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
   --terrain-level-min 0 \
   --terrain-level-max 1 \
+  --command-profile mixed \
+  --command-resampling-time 3.0 \
   --max-abs-wheel-omega 10.0 \
   --track-scale-delta-limit 0.30 \
   --drive-scale-delta-limit 0.20 \

@@ -10,7 +10,7 @@ error":
    on flat ground" height) and stays level (projected_gravity_b ~= [0,0,-1]).
    Catches spawn-height/leg-geometry mismatches (wheels floating above or
    sinking through the terrain).
-2. Drive: cmd_vel=1.0 m/s, run ~3s, then check xy displacement tracks
+2. Drive: cmd_vx=0.2 m/s, run ~3s, then check xy displacement tracks
    cmd_vel*t and wheel joint_vel tracks the commanded omega. Catches
    "wheels spin but the chassis doesn't move" traction failures.
 
@@ -47,6 +47,7 @@ def main() -> None:
 
     env_cfg = TarantulaSuspensionEnvCfg()
     env_cfg.scene.num_envs = 2
+    env_cfg.command_resampling_enabled = False
     env = gym.make("Isaac-Tarantula-Suspension-v0", cfg=env_cfg)
     env.reset()
 
@@ -55,7 +56,8 @@ def main() -> None:
     steps_per_sec = round(1.0 / (env_cfg.sim.dt * env_cfg.decimation))
 
     # --- Check 1: settle on flat ground with no drive command ---
-    base_env._cmd_vel[:] = 0.0
+    base_env._cmd_vx[:] = 0.0
+    base_env._cmd_wz[:] = 0.0
     for _ in range(2 * steps_per_sec):
         env.step(zero_action)
 
@@ -79,8 +81,9 @@ def main() -> None:
 
     # --- Check 2: drive at a known cmd_vel and verify displacement tracks it ---
     init_pos = data.root_pos_w[:, :2].clone()
-    base_env._cmd_vel[:] = 1.0
-    target_omega = 1.0 / env_cfg.wheel_radius
+    base_env._cmd_vx[:] = 0.2
+    base_env._cmd_wz[:] = 0.0
+    target_omega = 0.2 / env_cfg.wheel_radius
 
     drive_seconds = 3
     for _ in range(drive_seconds * steps_per_sec):
@@ -88,7 +91,7 @@ def main() -> None:
 
     data = base_env._robot.data
     disp = (data.root_pos_w[:, :2] - init_pos).norm(dim=-1)
-    expected_disp = 1.0 * drive_seconds
+    expected_disp = 0.2 * drive_seconds
     wheel_vel = data.joint_vel[:, base_env._wheel_joint_ids].mean(dim=-1)
 
     print(f"[drive] displacement xy: {disp.tolist()} (expected ~{expected_disp})")
@@ -96,7 +99,7 @@ def main() -> None:
 
     assert (disp > 0.5 * expected_disp).all(), (
         f"displacement {disp.tolist()} m is far below the expected {expected_disp} m "
-        "at cmd_vel=1.0 m/s for 3s -- wheels may be spinning without traction"
+        "at cmd_vx=0.2 m/s for 3s -- wheels may be spinning without traction"
     )
     assert ((wheel_vel - target_omega).abs() < 0.5 * target_omega).all(), (
         f"wheel_vel {wheel_vel.tolist()} rad/s far from commanded target {target_omega:.3f} rad/s"

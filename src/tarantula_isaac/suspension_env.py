@@ -42,6 +42,38 @@ from tarantula_control.suspension_core import LEGS
 from .suspension_env_cfg import TarantulaSuspensionEnvCfg
 
 
+REWARD_KEYS = (
+    "tracking_lin_vel",
+    "tracking_yaw_rate",
+    "yaw_sign",
+    "orientation",
+    "lin_vel_z",
+    "lateral_vel",
+    "stuck",
+    "ang_vel_xy",
+    "action_rate",
+    "action_magnitude",
+    "action_saturation",
+    "joint_limit",
+    "alive",
+    "termination",
+    "total",
+)
+
+METRIC_KEYS = (
+    "abs_vx_error",
+    "abs_wz_error",
+    "vx_error_sq",
+    "wz_error_sq",
+    "roll_abs",
+    "pitch_abs",
+    "action_saturation_rate",
+    "wheel_target_saturation_rate",
+    "cmd_vx_abs",
+    "cmd_wz_abs",
+)
+
+
 def _quat_roll_pitch(quat_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Batched roll/pitch from wxyz quaternions (N, 4)."""
     w, x, y, z = quat_w.unbind(-1)
@@ -87,26 +119,16 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._previous_actions = torch.zeros(self.num_envs, 3, device=self.device)
         self._cmd_vx = torch.zeros(self.num_envs, device=self.device)
         self._cmd_wz = torch.zeros(self.num_envs, device=self.device)
+        self._command_time_left = torch.zeros(self.num_envs, device=self.device)
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-            for key in [
-                "tracking_lin_vel",
-                "tracking_yaw_rate",
-                "yaw_sign",
-                "orientation",
-                "lin_vel_z",
-                "lateral_vel",
-                "stuck",
-                "ang_vel_xy",
-                "action_rate",
-                "action_magnitude",
-                "action_saturation",
-                "joint_limit",
-                "alive",
-                "termination",
-                "total",
-            ]
+            for key in REWARD_KEYS
         }
+        self._metric_sums = {
+            key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+            for key in METRIC_KEYS
+        }
+        self._last_wheel_target = torch.zeros(self.num_envs, 6, device=self.device)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -186,9 +208,12 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             -float(self.cfg.max_abs_wheel_omega),
             float(self.cfg.max_abs_wheel_omega),
         )
+        self._last_wheel_target = wheel.detach()
         self._robot.set_joint_velocity_target(wheel, joint_ids=self._wheel_joint_ids)
 
     def _get_observations(self) -> dict:
+        self._advance_command_curriculum()
+
         susp_joint_pos = self._robot.data.joint_pos[:, self._susp_joint_ids]
         susp_joint_vel = self._robot.data.joint_vel[:, self._susp_joint_ids]
         wheel_joint_vel = self._robot.data.joint_vel[:, self._wheel_joint_ids]
@@ -220,6 +245,15 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         if self.cfg.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * self.cfg.obs_noise_std
         return {"policy": obs}
+
+    def _advance_command_curriculum(self) -> None:
+        if not self.cfg.command_resampling_enabled:
+            return
+        dt = float(self.cfg.sim.dt) * float(self.cfg.decimation)
+        self._command_time_left -= dt
+        resample_envs = (self._command_time_left <= 0.0).nonzero(as_tuple=False).flatten()
+        if len(resample_envs) > 0:
+            self._sample_commands(resample_envs)
 
     def _termination_terms(self) -> dict[str, torch.Tensor]:
         roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
@@ -332,8 +366,30 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(tuple(reward_terms.values()), dim=0), dim=0)
         for key, value in reward_terms.items():
             self._episode_sums[key] += value
+        self._accumulate_metrics()
         self._episode_sums["total"] += reward
         return reward
+
+    def _accumulate_metrics(self) -> None:
+        roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
+        lin_vel_b = self._robot.data.root_lin_vel_b
+        ang_vel_b = self._robot.data.root_ang_vel_b
+        vx_error = lin_vel_b[:, 0] - self._cmd_vx
+        wz_error = ang_vel_b[:, 2] - self._cmd_wz
+        action_saturation_rate = (torch.abs(self._actions) >= 0.98).float().mean(dim=-1)
+        wheel_limit = max(float(self.cfg.max_abs_wheel_omega), 1.0e-6)
+        wheel_saturation_rate = (torch.abs(self._last_wheel_target) >= 0.98 * wheel_limit).float().mean(dim=-1)
+
+        self._metric_sums["abs_vx_error"] += torch.abs(vx_error)
+        self._metric_sums["abs_wz_error"] += torch.abs(wz_error)
+        self._metric_sums["vx_error_sq"] += torch.square(vx_error)
+        self._metric_sums["wz_error_sq"] += torch.square(wz_error)
+        self._metric_sums["roll_abs"] += torch.abs(roll)
+        self._metric_sums["pitch_abs"] += torch.abs(pitch)
+        self._metric_sums["action_saturation_rate"] += action_saturation_rate
+        self._metric_sums["wheel_target_saturation_rate"] += wheel_saturation_rate
+        self._metric_sums["cmd_vx_abs"] += torch.abs(self._cmd_vx)
+        self._metric_sums["cmd_wz_abs"] += torch.abs(self._cmd_wz)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         terminated = self._termination_flags()
@@ -369,6 +425,14 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         for key in self._episode_sums.keys():
             extras[f"Episode_Reward/{key}"] = torch.mean(self._episode_sums[key][env_ids]) / denom
             self._episode_sums[key][env_ids] = 0.0
+        for key in self._metric_sums.keys():
+            value = torch.mean(self._metric_sums[key][env_ids]) / denom
+            if key.endswith("_sq"):
+                metric_key = key[:-3] + "_rms"
+                extras[f"Episode_Metric/{metric_key}"] = torch.sqrt(torch.clamp(value, min=0.0))
+            else:
+                extras[f"Episode_Metric/{key}"] = value
+            self._metric_sums[key][env_ids] = 0.0
 
         # The first reset happens before the robot is placed on generated terrain
         # origins, so termination terms from zero-length episodes are not useful.
@@ -396,6 +460,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        self._last_wheel_target[env_ids] = 0.0
 
         self._sample_commands(env_ids)
 
@@ -413,6 +478,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
         self._cmd_vx[env_ids] = 0.0
         self._cmd_wz[env_ids] = 0.0
+        self._command_time_left[env_ids] = float(self.cfg.command_resampling_time_s)
 
         vx_abs_hi = max(abs(self.cfg.command_vx_range[0]), abs(self.cfg.command_vx_range[1]))
         wz_abs_hi = max(abs(self.cfg.command_wz_range[0]), abs(self.cfg.command_wz_range[1]))

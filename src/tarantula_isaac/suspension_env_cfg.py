@@ -55,6 +55,8 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     command_pure_turn_prob = 0.25
     command_min_abs_vx = 0.12
     command_min_abs_wz = 0.15
+    command_resampling_enabled = True
+    command_resampling_time_s = 3.0
 
     # Wheel-force observation: deployable equivalent is wheel-axis 3D F/T force.
     # nominal_wheel_load is used for observation normalization only.

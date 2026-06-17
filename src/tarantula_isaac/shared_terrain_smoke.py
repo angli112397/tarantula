@@ -33,6 +33,7 @@ def main() -> None:
     ensure_tarantula_usd()
     cfg = TarantulaSuspensionEnvCfg()
     cfg.scene.num_envs = args.num_envs
+    cfg.command_resampling_enabled = False
     cfg.terrain = make_shared_heightmap_terrain_cfg(args.terrain_dir, debug_vis=False)
 
     env = TarantulaSuspensionEnv(cfg=cfg, render_mode=None)

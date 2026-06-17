@@ -266,7 +266,7 @@ Motion-compensation dimension coverage:
 | yaw compensation | `cmd_wz`, measured yaw rate, wheel velocities | `cmd_wz`, IMU `root_ang_vel_b.z`, `wheel_joint_vel(6)` | covered |
 | forward/slope assist | `cmd_vx`, pitch/gravity, wheel velocities, wheel force | `cmd_vx`, projected gravity, wheel velocities, wheel 3D F/T | covered without actor linear velocity |
 | traction/load redistribution | per-wheel force and wheel velocity | wheel-end 3D F/T in Gazebo, contact-force equivalent in Isaac, wheel velocities | covered for simulation; real hardware needs wheel-end F/T or current/load estimator |
-| stuck detection | high wheel speed/action with poor reward progress, pitch/force context | wheel velocities, command, force, pitch; truth velocity only in reward/eval | covered for training; explicit status topic still missing |
+| stuck detection | high wheel speed/action with poor reward progress, pitch/force context | wheel velocities, command, force, pitch; truth velocity only in reward/eval; `/rl_policy/status` exposes action saturation and measured yaw rate | covered for training and Gazebo deployment diagnostics |
 | side-slope correction | roll/projected gravity, yaw error, force asymmetry | projected gravity, yaw rate, wheel force | covered |
 | terrain preview | local heightmap ahead of robot | generated heightmap exists in sim, not in Stage A obs | deferred to Stage C |
 | absolute localization/nav quality | odom/SLAM pose | available through Gazebo/Nav stack, not policy obs | not needed for Stage A compensation |
@@ -286,7 +286,7 @@ Sensor decision by development ring:
 | 0/1 | joint encoders from `/joint_states` | keep | hip position/velocity and wheel velocity cover proprioception |
 | 0/1 | wheel-end F/T | keep as simulation baseline | directly supports wheel-load and traction reasoning; hardware may replace it with calibrated motor current/load estimation |
 | 1/2 | deployable wheel odometry topic | add before Nav/RL deployment gates | needed as an engineering interface; Gazebo truth odom remains diagnostic only |
-| 2/3 | `/rl_policy/status` | add before long RL deployment | exposes saturation, command error, fallback, and stuck/fall flags |
+| 2/3 | `/rl_policy/status` | keep | exposes RL enable state, action values, action saturation, wheel-command magnitude, current command, and measured yaw rate |
 | 3 | geometry contact booleans | do not add | not deployable and encourages policies to depend on contact truth |
 | 5 | hip torque/current estimate | defer | useful for posture RL and load inference, but not needed for Stage A structured compensation |
 | 6/7 | terrain preview from heightmap/stereo/lidar | defer to Stage C | papers use exteroception for harder terrain, but adding it before baseline parity will hide model/control bugs |
@@ -325,8 +325,9 @@ Reward baseline follows the trimmed rough-terrain locomotion pattern used by leg
 ```
 
 Stage A command sampling is intentionally not uniform random over a continuous
-box. Each reset samples one of four command families so yaw does not disappear
-into near-zero angular commands:
+box. During training, each environment periodically resamples one of four
+command families so yaw does not disappear into near-zero angular commands and
+one episode is not dominated by a single easy command:
 
 ```text
 20% stop
@@ -337,7 +338,9 @@ into near-zero angular commands:
 
 Straight and arc commands use `|cmd_vx| >= 0.12 m/s`. Pure-turn and arc
 commands use `|cmd_wz| >= 0.15 rad/s`. Left/right and forward/backward signs
-are sampled symmetrically.
+are sampled symmetrically. The `stage0` command profile narrows these ranges
+for the first terrain row; fixed Isaac evaluation and yaw-authority sweeps
+disable command resampling and set deterministic segment commands.
 
 Wheel-load balance is not part of the Stage A reward. It remains an observation
 and diagnostic metric; adding it to reward is deferred until the vehicle can
@@ -360,6 +363,9 @@ Training diagnostics must expose:
 
 - `Episode_Reward/*` for each reward term and total reward;
 - `Episode_Termination/*` for tilt, height, velocity, bounds, non-finite state, and timeout;
+- `Episode_Metric/*` for benchmark-style tracking and stability metrics:
+  absolute/RMS `vx/wz` error, roll/pitch magnitude, action saturation,
+  wheel-target saturation, and sampled command magnitudes;
 - smoke tests must fail if these keys disappear.
 
 Deterministic Isaac evaluation is mandatory before Gazebo deployment. Run
@@ -399,7 +405,8 @@ Current verified checks:
 - exported `.npz` actor can command Gazebo through `motion_control_node`;
 - Gazebo vehicle moves on generated terrain under the exported actor.
 - `scripts/gazebo_cmd_tracking_benchmark.py` defines the Gazebo command-tracking
-  acceptance path for `cmd_vx/cmd_wz`.
+  acceptance path for `cmd_vx/cmd_wz`, including raw CSV samples, per-segment
+  summaries, and classical-vs-RL comparison output.
 - v2 direct hip trajectory commands establish a symmetric, stable natural
   posture on generated `gazebo_demo/42`;
 - `scripts/gazebo_chassis_pose_diffdrive_test.py` verifies direct wheel
@@ -442,13 +449,12 @@ Immediate rules:
    reward improves.
 7. Run deterministic Isaac eval in `open_loop` and `npz` modes before Gazebo RL
    deployment.
-8. Add `/rl_policy/status` before longer deployment tests so saturation,
-   command tracking error, and fallback state are visible.
+8. Use `/rl_policy/status` and `gazebo_cmd_tracking_benchmark.py compare` before
+   longer deployment tests so saturation and tracking regressions are visible.
 
 Application-facing interfaces to add after the command baseline:
 
 1. `/rl_policy/enabled` or lifecycle transition to switch policy output on/off.
-2. `/rl_policy/status` with command tracking error, saturation, timeout, and
-   fall/stuck flags.
-3. Emergency stop input that forces zero wheel command and neutral suspension.
-4. Gazebo/Isaac benchmark metrics for `cmd_vx/cmd_wz` tracking error.
+2. Emergency stop input that forces zero wheel command and neutral suspension.
+3. Higher-level odometry interface for Nav2 that remains separate from Gazebo
+   truth observer data.

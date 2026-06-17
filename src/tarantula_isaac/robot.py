@@ -63,6 +63,30 @@ def _read_stamp(path: str) -> str:
         return ""
 
 
+def _prepend_env_paths(env: dict[str, str], key: str, paths: list[Path | str]) -> None:
+    existing = env.get(key, "")
+    values = [str(path) for path in paths if os.path.exists(path)]
+    if existing:
+        values.append(existing)
+    if values:
+        env[key] = os.pathsep.join(values)
+
+
+def _xacro_env() -> dict[str, str]:
+    env = os.environ.copy()
+    repo_install = _repo_root() / "install"
+    package_prefixes = [path for path in repo_install.iterdir()] if repo_install.exists() else []
+    ros_prefix = Path("/opt/ros/humble")
+    ros_python_paths = [
+        ros_prefix / "lib" / "python3.10" / "site-packages",
+        ros_prefix / "local" / "lib" / "python3.10" / "dist-packages",
+    ]
+    _prepend_env_paths(env, "AMENT_PREFIX_PATH", package_prefixes + [ros_prefix])
+    _prepend_env_paths(env, "CMAKE_PREFIX_PATH", package_prefixes + [ros_prefix])
+    _prepend_env_paths(env, "PYTHONPATH", ros_python_paths)
+    return env
+
+
 def _ensure_core_urdf(urdf_path: str) -> None:
     """Generate the temporary Isaac URDF from xacro when sources changed."""
     source_paths = _xacro_sources()
@@ -81,13 +105,22 @@ def _ensure_core_urdf(urdf_path: str) -> None:
         raise FileNotFoundError(f"missing Tarantula xacro source: {xacro_path}")
 
     os.makedirs(os.path.dirname(urdf_path), exist_ok=True)
+    command = [xacro_bin, str(xacro_path), "wheel_collision:=cylinder", "lidar:=false"]
     result = subprocess.run(
-        [xacro_bin, str(xacro_path), "wheel_collision:=cylinder", "lidar:=false"],
-        check=True,
+        command,
+        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=_xacro_env(),
     )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "failed to generate Isaac URDF with xacro:\n"
+            f"  command: {' '.join(command)}\n"
+            f"  stderr: {result.stderr.strip()}\n"
+            f"  stdout: {result.stdout.strip()}"
+        )
     Path(urdf_path).write_text(result.stdout, encoding="utf-8")
     Path(URDF_STAMP_PATH).write_text(source_hash, encoding="utf-8")
 

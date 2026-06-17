@@ -1,4 +1,4 @@
-"""M7 v5 PPO training — direct runner (no Hydra task registry needed).
+"""Stage A PPO training -- direct runner (no Hydra task registry needed).
 
 Usage (from repo root, with isaac_venv active):
   python3 src/tarantula_isaac/train_v5.py [--num_envs 64] [--max_iterations 400]
@@ -11,19 +11,25 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_TERRAIN_DIR = REPO_ROOT / "generated" / "terrains" / "gazebo_demo" / "42"
+DEFAULT_TERRAIN_DIR = REPO_ROOT / "generated" / "terrains" / "rl_curriculum" / "42"
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="M7 v5 PPO training")
+parser = argparse.ArgumentParser(description="Stage A PPO training")
 parser.add_argument("--num_envs", type=int, default=64)
 parser.add_argument("--max_iterations", type=int, default=400)
 parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to warm-start from")
 parser.add_argument(
     "--command-profile",
-    choices=("mixed", "yaw_only"),
+    choices=("mixed", "yaw_only", "stage0"),
     default="mixed",
-    help="Command curriculum profile. yaw_only samples pure turns only.",
+    help="Command curriculum profile. stage0 uses easiest command magnitudes; yaw_only samples pure turns only.",
+)
+parser.add_argument(
+    "--command-resampling-time",
+    type=float,
+    default=None,
+    help="Seconds between sampled cmd_vel commands during training.",
 )
 parser.add_argument(
     "--track-scale-delta-limit",
@@ -87,6 +93,7 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 import importlib.metadata as _meta
+from isaacsim.core.utils.extensions import enable_extension
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
 from isaaclab.utils.io import dump_yaml
@@ -107,6 +114,7 @@ torch.backends.cudnn.benchmark = False
 
 
 def main():
+    enable_extension("isaacsim.asset.importer.urdf")
     ensure_tarantula_usd()
 
     env_cfg = TarantulaSuspensionEnvCfg()
@@ -124,12 +132,24 @@ def main():
         env_cfg.max_abs_wheel_omega = float(args.max_abs_wheel_omega)
     if args.action_saturation_weight is not None:
         env_cfg.reward_action_saturation_weight = float(args.action_saturation_weight)
+    if args.command_resampling_time is not None:
+        env_cfg.command_resampling_time_s = float(args.command_resampling_time)
     if args.command_profile == "yaw_only":
         env_cfg.command_stop_prob = 0.0
         env_cfg.command_straight_prob = 0.0
         env_cfg.command_pure_turn_prob = 1.0
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_wz = 0.25
+    elif args.command_profile == "stage0":
+        env_cfg.command_stop_prob = 0.20
+        env_cfg.command_straight_prob = 0.35
+        env_cfg.command_pure_turn_prob = 0.30
+        env_cfg.command_vx_range = (-0.16, 0.16)
+        env_cfg.command_wz_range = (-0.25, 0.25)
+        env_cfg.command_min_abs_vx = 0.08
+        env_cfg.command_min_abs_wz = 0.12
+        env_cfg.obs_noise_std = min(float(env_cfg.obs_noise_std), 0.01)
+        env_cfg.push_lin_vel_range = (-0.2, 0.2)
 
     agent_cfg = TarantulaSuspensionPPORunnerCfg()
     agent_cfg.max_iterations = args.max_iterations

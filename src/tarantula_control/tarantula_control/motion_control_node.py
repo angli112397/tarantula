@@ -107,6 +107,8 @@ class MotionControlNode(Node):
 
         self.wheel_pub = self.create_publisher(
             Float64MultiArray, '/wheel_velocity_controller/commands', 10)
+        self.status_pub = self.create_publisher(
+            Float64MultiArray, '/rl_policy/status', 10)
 
         self.create_subscription(Imu, '/imu/data', self.imu_cb, 50)
         self.create_subscription(JointState, '/joint_states', self.joint_cb, 50)
@@ -228,6 +230,18 @@ class MotionControlNode(Node):
             dt=dt,
         )
         self.wheel_pub.publish(Float64MultiArray(data=wheel_cmds))
+        action_saturation = float(np.max(np.abs(action))) if action.size else 0.0
+        self.status_pub.publish(Float64MultiArray(data=[
+            1.0 if self.policy is not None else 0.0,
+            float(action[0]) if action.size > 0 else 0.0,
+            float(action[1]) if action.size > 1 else 0.0,
+            float(action[2]) if action.size > 2 else 0.0,
+            action_saturation,
+            max((abs(float(v)) for v in wheel_cmds), default=0.0),
+            float(command.vx),
+            float(command.wz),
+            float(ang_vel_b[2]),
+        ]))
 
 
 def main():
