@@ -1,11 +1,10 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""RSL-RL PPO runner config for Tarantula Stage B wheel + hip compensation.
+"""RSL-RL PPO runner config for Tarantula active-suspension posture control.
 
-MLP (obs=53, action=9): the first three actions are bounded effective-track and
-left/right drive scale compensation around the classical skid-steer cmd_vel
-baseline. The final six actions are bounded hip position targets. Hidden-layer
-size follows the common rough-terrain locomotion PPO baseline [512, 256, 128].
+MLP (obs=50, action=6): the policy only commands bounded hip position targets.
+Hidden-layer size follows the rough-terrain locomotion PPO baseline
+[512, 256, 128].
 """
 
 from isaaclab.utils import configclass

@@ -1,12 +1,14 @@
-# Nav2 配置（Humble）—— 与 slam_toolbox 在线建图共用（map->odom 由 SLAM 提供，
-# 无 AMCL/map_server）。cmd_vel 直接进入 motion_control_node 的 /cmd_vel。
+# Nav2 配置（Humble）—— 静态地图和在线 SLAM 共用。
+# 默认 topic 保持 /cmd_vel + /odometry/filtered，launch 文件可覆盖到官方
+# diff_drive_controller 的 /diff_drive_controller/cmd_vel_unstamped 和
+# /diff_drive_controller/odom。map->odom 由 AMCL 或 slam_toolbox 提供。
 
 bt_navigator:
   ros__parameters:
     use_sim_time: true
     global_frame: map
     robot_base_frame: base_link
-    odom_topic: /tarantula/truth_odom
+    odom_topic: /odometry/filtered
     bt_loop_duration: 10
     default_server_timeout: 20
 
@@ -60,23 +62,24 @@ controller_server:
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
-      transform_tolerance: 0.2
+      transform_tolerance: 0.4
       xy_goal_tolerance: 0.25
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: true
       stateful: true
-      # ObstacleFootprint 而非 BaseObstacle：1.32×0.78 长方形车体过 1.6m 窄门，
-      # 只查中心点代价会斜切贴墙（实测离门墩 3cm 致全局规划起点落入致死区）；
-      # footprint 碰撞检查让擦墙轨迹直接判废
+      # Conservative large-chassis tuning: prefer staying away from walls over
+      # tightly hugging the geometric shortest path. ObstacleFootprint rejects
+      # footprint collisions; inflation and path costs should already steer the
+      # global/local plan toward corridor centers before collision is imminent.
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign",
                 "PathAlign", "PathDist", "GoalDist"]
-      ObstacleFootprint.scale: 0.02
-      PathAlign.scale: 32.0
+      ObstacleFootprint.scale: 0.10
+      PathAlign.scale: 18.0
       PathAlign.forward_point_distance: 0.325
-      GoalAlign.scale: 24.0
+      GoalAlign.scale: 16.0
       GoalAlign.forward_point_distance: 0.325
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
+      PathDist.scale: 24.0
+      GoalDist.scale: 18.0
       RotateToGoal.scale: 32.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
@@ -93,9 +96,11 @@ local_costmap:
       width: 6
       height: 6
       resolution: 0.05
-      # 车体含轮实测包络 1.26×0.71 m，长方形用多边形 footprint（圆半径会把
-      # 1.6m 窄门膨胀死）
-      footprint: "[[0.66, 0.39], [0.66, -0.39], [-0.66, -0.39], [-0.66, 0.39]]"
+      # 2D planning footprint derived from v3 URDF geometry:
+      #   half-length 0.56 m ≈ pivot_x(0.34) + arm_length(0.28)*cos(arm_angle(0.698)) = 0.554 m
+      #   half-width  0.37 m = pivot_y(0.26) + wheel_lateral_offset(0.07) + wheel_width/2(0.037) = 0.367 m
+      footprint: "[[0.56, 0.37], [0.56, -0.37], [-0.56, -0.37], [-0.56, 0.37]]"
+      footprint_padding: 0.0
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -114,7 +119,7 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
+        cost_scaling_factor: 2.8
         inflation_radius: 0.55
       always_send_full_costmap: true
 
@@ -126,7 +131,8 @@ global_costmap:
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
-      footprint: "[[0.66, 0.39], [0.66, -0.39], [-0.66, -0.39], [-0.66, 0.39]]"
+      footprint: "[[0.56, 0.37], [0.56, -0.37], [-0.56, -0.37], [-0.56, 0.37]]"
+      footprint_padding: 0.0
       resolution: 0.05
       track_unknown_space: true
       # 只用 SLAM 静态地图 + 膨胀，不挂 obstacle_layer：车身在坡上倾斜时
@@ -138,8 +144,8 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.55
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.65
       always_send_full_costmap: true
 
 planner_server:
@@ -156,7 +162,7 @@ planner_server:
       allow_unknown: true
       max_planning_time: 2.0
       downsample_costmap: false
-      cost_travel_multiplier: 2.0
+      cost_travel_multiplier: 10.0
 
 behavior_server:
   ros__parameters:

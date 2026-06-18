@@ -1,10 +1,12 @@
-"""Stop-turn-drive skid-steer baseline and optional structured RL compensation.
+"""Skid-steer motion baseline.
 
-The deployable baseline first shapes normal ``cmd_vel`` input into simple
-execution primitives, then maps those primitives to per-wheel skid-steer
-velocity targets. RL is intentionally limited to bounded corrections to the
-effective track scale and left/right drive scales, so it learns terrain/contact
-compensation instead of relearning planar kinematics.
+Maps ``cmd_vel`` to per-wheel velocity targets via a calibrated skid-steer
+differential. The stop-turn-drive shaper is retained in ``CommandShaper`` for
+use by the active-suspension posture policy (observation building), but is no
+longer in the wheel-control path.
+
+RL does not alter wheel commands. The learned posture policy is a separate
+active-suspension controller running in its own node.
 """
 
 from __future__ import annotations
@@ -16,11 +18,8 @@ import numpy as np
 
 from .control_interfaces import (
     CmdVelLimiter,
-    DRIVE_SCALE_DELTA_LIMIT,
     MAX_ABS_WHEEL_OMEGA,
     RIGHT_LEGS,
-    TRACK_SCALE_DELTA_LIMIT,
-    YAW_AUTHORITY_MULTIPLIER,
     clamp_abs,
     clamp,
     skid_steer_wheel_speeds,
@@ -29,13 +28,11 @@ from .control_interfaces import (
 from .suspension_core import LEGS
 
 
-STAGE_A_OBSERVATION_DIM = 47
-STAGE_A_ACTION_DIM = 3
-STAGE_B_OBSERVATION_DIM = 53
-STAGE_B_ACTION_DIM = 9
+POSTURE_OBSERVATION_DIM = 50
+POSTURE_ACTION_DIM = 6
 WHEEL_TARGET_DIM = 6
 
-STAGE_A_OBSERVATION_LAYOUT = (
+POSTURE_OBSERVATION_LAYOUT = (
     ("projected_gravity_b", 3, "IMU orientation"),
     ("root_ang_vel_b", 3, "IMU angular velocity"),
     ("susp_joint_pos", 6, "joint_states hip/arm positions"),
@@ -44,8 +41,13 @@ STAGE_A_OBSERVATION_LAYOUT = (
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
     ("cmd_vx", 1, "shaped execution forward velocity"),
     ("cmd_wz", 1, "shaped execution yaw rate"),
-    ("prev_action", 9, "previous Stage B action; legacy Stage A uses 3 values"),
+    ("prev_action", 6, "previous hip target action"),
 )
+
+# Backwards-compatible constant name for callers that only need the current
+# deployable posture contract dimensions.
+STAGE_B_OBSERVATION_DIM = POSTURE_OBSERVATION_DIM
+STAGE_B_ACTION_DIM = POSTURE_ACTION_DIM
 
 
 class MotionMode(str, Enum):
@@ -59,15 +61,13 @@ class MotionControlConfig:
     max_abs_cmd_vx: float = 0.3
     max_abs_cmd_wz: float = 0.4
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
-    pure_turn_track_scale: float = 3.0
-    track_scale_delta_limit: float = TRACK_SCALE_DELTA_LIMIT
-    drive_scale_delta_limit: float = DRIVE_SCALE_DELTA_LIMIT
+    drive_scale: float = 1.1532
+    pure_turn_track_scale: float = 0.7287
     yaw_rate_kp: float = 0.0
     yaw_rate_ki: float = 0.0
     yaw_integral_limit: float = 0.8
     max_wheel_accel: float = 12.0
-    pure_turn_forward_bias: float = 0.0
-    pure_turn_vx_deadband: float = 0.03
+    # Used by CommandShaper (posture_policy_node) to determine suspension mode.
     turn_enter_wz: float = 0.08
     turn_exit_wz: float = 0.04
 
@@ -78,20 +78,12 @@ class MotionCommand:
     wz: float
 
 
-@dataclass(frozen=True)
-class StructuredCompensation:
-    """Bounded RL correction around calibrated skid-steer kinematics."""
-
-    track_scale_delta: float = 0.0
-    left_drive_scale_delta: float = 0.0
-    right_drive_scale_delta: float = 0.0
-
-
 class CommandShaper:
-    """Shape application cmd_vel into deployable motion primitives.
+    """Shape cmd_vel into stop/turn/drive execution primitives.
 
-    The shaper owns behavior policy such as stop-turn-drive. The wheel
-    controller below remains a plain skid-steer velocity mapper.
+    Used by the active-suspension posture policy to determine which suspension
+    posture mode to apply. No longer in the wheel-control path; wheels receive
+    unshaped skid-steer commands directly.
     """
 
     def __init__(self, config: MotionControlConfig | None = None):
@@ -161,89 +153,25 @@ class SkidSteerMotionController:
         self._last_wheel_targets = limited
         return limited
 
-    def _effective_vx_for_turn(self, command: MotionCommand) -> float:
-        if (
-            self.config.pure_turn_forward_bias <= 0.0
-            or abs(command.vx) > self.config.pure_turn_vx_deadband
-            or abs(command.wz) < 1.0e-4
-        ):
-            return command.vx
-        yaw_fraction = min(abs(command.wz) / max(self.config.max_abs_cmd_wz, 1.0e-6), 1.0)
-        return command.vx + self.config.pure_turn_forward_bias * yaw_fraction
-
     def scheduled_track_scale(self, command: MotionCommand) -> float:
         if abs(command.wz) < 1.0e-4:
             return 1.0
         return self.config.pure_turn_track_scale
 
-    def _bounded_compensation(
-        self,
-        compensation_action: np.ndarray | list[float] | tuple[float, ...] | StructuredCompensation | None,
-    ) -> StructuredCompensation:
-        if compensation_action is None:
-            return StructuredCompensation()
-        if isinstance(compensation_action, StructuredCompensation):
-            raw = np.asarray(
-                [
-                    compensation_action.track_scale_delta,
-                    compensation_action.left_drive_scale_delta,
-                    compensation_action.right_drive_scale_delta,
-                ],
-                dtype=np.float32,
-            )
-        else:
-            raw = np.asarray(compensation_action, dtype=np.float32).reshape(-1)
-        if raw.shape[0] < STAGE_A_ACTION_DIM:
-            raise ValueError(f"compensation action must have at least 3 values, got {raw.shape[0]}")
-        raw = raw[:STAGE_A_ACTION_DIM]
-        raw = np.clip(raw, -1.0, 1.0)
-        return StructuredCompensation(
-            track_scale_delta=float(raw[0]) * float(self.config.track_scale_delta_limit),
-            left_drive_scale_delta=float(raw[1]) * float(self.config.drive_scale_delta_limit),
-            right_drive_scale_delta=float(raw[2]) * float(self.config.drive_scale_delta_limit),
-        )
-
-    def _mode_gated_compensation(
-        self,
-        execution_command: MotionCommand,
-        compensation: StructuredCompensation,
-    ) -> StructuredCompensation:
-        if abs(execution_command.vx) < 1.0e-4 and abs(execution_command.wz) < 1.0e-4:
-            return StructuredCompensation()
-        track_delta = compensation.track_scale_delta if abs(execution_command.wz) >= 1.0e-4 else 0.0
-        left_delta = compensation.left_drive_scale_delta if abs(execution_command.vx) >= 1.0e-4 else 0.0
-        right_delta = compensation.right_drive_scale_delta if abs(execution_command.vx) >= 1.0e-4 else 0.0
-        return StructuredCompensation(
-            track_scale_delta=track_delta,
-            left_drive_scale_delta=left_delta,
-            right_drive_scale_delta=right_delta,
-        )
-
     def wheel_targets(
         self,
         command: MotionCommand,
         *,
-        compensation_action: np.ndarray | list[float] | tuple[float, ...] | StructuredCompensation | None = None,
         measured_wz: float | None = None,
         dt: float | None = None,
     ) -> list[float]:
-        effective_vx = self._effective_vx_for_turn(command)
-        compensation = self._mode_gated_compensation(
-            command,
-            self._bounded_compensation(compensation_action),
-        )
-        base_track_scale = self.scheduled_track_scale(command)
-        track_scale = max(0.1, base_track_scale * (1.0 + compensation.track_scale_delta))
-        left_scale = max(0.0, 1.0 + compensation.left_drive_scale_delta)
-        right_scale = max(0.0, 1.0 + compensation.right_drive_scale_delta)
+        effective_vx = command.vx * self.config.drive_scale
         wheel = [
             clamp_abs(omega, self.config.max_abs_wheel_omega)
             for omega in skid_steer_wheel_speeds(
                 effective_vx,
                 command.wz,
-                track_scale=track_scale,
-                left_scale=left_scale,
-                right_scale=right_scale,
+                track_scale=self.scheduled_track_scale(command),
             )
         ]
         if measured_wz is None:
@@ -274,24 +202,18 @@ class SkidSteerMotionController:
             )
         return corrected
 
-    def compensated_wheel_targets(
+    def filtered_wheel_targets(
         self,
         command: MotionCommand,
-        compensation_action: np.ndarray | list[float] | tuple[float, ...] | StructuredCompensation | None,
         *,
         measured_wz: float | None = None,
         dt: float | None = None,
     ) -> list[float]:
-        compensated = self.wheel_targets(
-            command,
-            compensation_action=compensation_action,
-            measured_wz=measured_wz,
-            dt=dt,
-        )
-        return self._rate_limit_wheel_targets(compensated, dt)
+        targets = self.wheel_targets(command, measured_wz=measured_wz, dt=dt)
+        return self._rate_limit_wheel_targets(targets, dt)
 
 
-def build_stage_a_observation(
+def build_posture_observation(
     *,
     projected_gravity_b: tuple[float, float, float],
     root_ang_vel_b: tuple[float, float, float],
@@ -302,8 +224,11 @@ def build_stage_a_observation(
     command: MotionCommand,
     prev_action: np.ndarray,
 ) -> np.ndarray:
-    """Build the deployable Stage B observation in Isaac order, with Stage A fallback."""
+    """Build the deployable active-suspension observation in Isaac/Gazebo order."""
 
+    prev_action_values = np.asarray(prev_action, dtype=np.float32).reshape(-1)
+    if prev_action_values.shape[0] != POSTURE_ACTION_DIM:
+        raise ValueError(f"prev_action must be {POSTURE_ACTION_DIM}D, got {prev_action_values.shape[0]}")
     obs_values = (
         list(projected_gravity_b)
         + list(root_ang_vel_b)
@@ -312,10 +237,12 @@ def build_stage_a_observation(
         + [wheel_joint_vel[leg] for leg in LEGS]
         + [component for leg in LEGS for component in wheel_force_normalized(wheel_force[leg])]
         + [command.vx, command.wz]
-        + list(np.asarray(prev_action, dtype=np.float32).reshape(-1))
+        + list(prev_action_values)
     )
     obs = np.asarray(obs_values, dtype=np.float32)
-    expected_dim = STAGE_B_OBSERVATION_DIM if np.asarray(prev_action).reshape(-1).shape[0] == STAGE_B_ACTION_DIM else STAGE_A_OBSERVATION_DIM
-    if obs.shape[0] != expected_dim:
-        raise ValueError(f"observation must be {expected_dim}D, got {obs.shape[0]}")
+    if obs.shape[0] != POSTURE_OBSERVATION_DIM:
+        raise ValueError(f"observation must be {POSTURE_OBSERVATION_DIM}D, got {obs.shape[0]}")
     return obs
+
+
+build_stage_b_observation = build_posture_observation

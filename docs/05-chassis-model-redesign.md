@@ -1,127 +1,67 @@
-# 底盘物理模型重设计记录
+# Chassis v3 Baseline
 
-日期：2026-06-16
+当前底盘 baseline 是 `tarantula_v3.urdf.xacro`。
 
-目标：按粗糙地形车辆 RL 论文维护当前底盘物理 baseline。本文只记录当前有效模型决策。
+## Design Intent
 
-## 论文实践映射
+v3 不重新发明运动系统。它保留已经验证过的六轮/六髋关节拓扑，但把叙事和优化重点转到主动悬挂：
 
-参考方向：
+- 传统差速/滑移转向负责移动；
+- Nav2 demo 默认使用官方 `diff_drive_controller` 推断 `odom->base_link`；
+- 自定义 per-wheel controller 的标定/姿态评估路径可通过 wheel encoder odom + IMU 进入 `robot_localization`；
+- Nav2/SLAM 负责路径和地图；
+- RL 只负责六个髋关节，让车身更稳、轮载更均衡、LiDAR 姿态更适合建图。
 
-- Wiberg et al., *Control of rough terrain vehicles using deep reinforcement learning*：
-  六轮主动悬挂粗糙地形车辆，强调真实质量/力矩限制、轮载、轮滑、能耗、底盘触地
-  和地形课程；轮子用简化刚体接触以提升仿真稳定性。
-- Bouton et al., *Learning All-Terrain Locomotion for a Planetary Rover with Actively
-  Articulated Suspension*：主动悬挂行星车使用姿态、关节、力/力矩和地形高程输入，
-  通过 domain randomization、传感器噪声和系统辨识做迁移。
-- Margolis et al., *Rapid Locomotion via Reinforcement Learning*：动作输出关节目标，
-  执行器动态、质量、COM、摩擦和 motor strength 都需要随机化/对齐。
+## Geometry Changes
 
-## 本轮决策
+v3 复用 v2 chassis macro，并覆盖少量关键几何参数：
 
-1. 当前 baseline model 固定为 v2：
-   - 文件：`tarantula_v2.urdf.xacro`、`tarantula_core_v2.urdf.xacro`、
-     `tarantula_chassis_v2.xacro`、`tarantula_common.xacro`;
-   - launch 参数：`robot_model:=tarantula_v2.urdf.xacro`;
-   - 六条腿是单自由度髋关节/摆臂，轮子直接安装在摆臂末端；
-   - 不再使用被动 rocker、虚拟弹簧滑柱或 wheel-end 被动悬挂；
-   - 不再保留旧模型或 fixed-hip 诊断分支。
+- arm length: `0.22 -> 0.28 m`;
+- arm height: `0.060 -> 0.055 m`;
+- wheel lateral offset: `0.065 -> 0.070 m`.
 
-2. 轮胎 visual 保持圆柱，collision baseline 使用球体：
-   - launch 参数：`wheel_collision:=sphere`;
-   - 原因：单坡 A/B 显示 cylinder 轮速可跟随但上坡牵引效率显著低于 sphere；
-   - `cylinder` 保留为接触物理 A/B，不作为默认地形验收模型。
+这样增加髋关节姿态控制力臂，同时避免引入新的被动弹簧、rocker、额外接触自由度或复杂关节拓扑。
 
-3. 底盘腹部 collision 显式命名并略收腹：
-   - `base_belly_collision`
-   - 原因：粗糙地形任务应明确建模托底风险，而不是让视觉外壳或装饰件参与接触。
+## Interfaces
 
-4. base COM 显式参数化：
-   - `body_com_x/y/z`
-   - 原因：后续 Isaac/Gazebo 都可以围绕 COM 做域随机化和载荷敏感性测试。
+Unchanged deployable interfaces:
 
-5. 删除几何 contact sensor 作为控制/观测来源：
-   - 不再发布 `/contact/{leg}` 或 `/contact/base`；
-   - 策略观测统一为轮轴 F/T 推出的连续 `wheel_force_b(18)`；
-   - 原因：真实系统中几何接触真值难以实现，轮轴/轮毂 F/T 更接近论文中的
-     force-torque measurement。
+- `/cmd_vel`;
+- `/wheel_velocity_controller/commands`;
+- `/suspension_controller/joint_trajectory`;
+- `/imu/data`;
+- `/joint_states`;
+- `/ft_wheel/fl`, `/ft_wheel/fr`, `/ft_wheel/ml`, `/ft_wheel/mr`, `/ft_wheel/rl`, `/ft_wheel/rr`;
+- `/scan`.
 
-6. 删除 Gazebo-only 髋关节虚拟弹簧：
-   - 不再写 `<springStiffness>` / `<implicitSpringDamper>`；
-   - Gazebo v2 hip 使用 `joint_trajectory_controller/JointTrajectoryController`；
-   - 控制入口是 `/suspension_controller/joint_trajectory`，目标角度从当前自然姿态初始化；
-   - 当前 Stage B RL 直接输出 bounded hip target，但仍通过同一个 trajectory controller 发布。
+Navigation odometry:
 
-7. Isaac USD 缓存：
-   - 当前基线：`tarantula_v2_actuated_sphere_wheels.usd`
-   - `/tmp/tarantula_v2.urdf` 和 `/tmp/tarantula_usd/*.usd` 由源文件 hash
-     控制重生，URDF/执行器参数变化后不得复用旧模型。
+- `/diff_drive_controller/odom`: current Nav2 smoke-test odom source;
+- `/wheel/odom`: custom per-wheel controller odom source;
+- `/odometry/filtered`: robot_localization EKF output for the custom per-wheel path;
+- no Gazebo truth odom is used as a control, SLAM, Nav2, or policy input.
 
-8. reward 方向同步：
-   - baseline reward 只保留速度跟踪、yaw-rate 跟踪、姿态、动作平滑、
-     动作幅度/饱和惩罚、关节软限位和终止惩罚；
-   - `wheel_force_b(18)` 先作为观测和诊断指标，不进入 baseline reward。
+New policy runtime:
 
-9. Gazebo 物理验收使用 v2 直接验收脚本：
-   - `scripts/gazebo_chassis_pose_diffdrive_test.py --profile turn-only`;
-   - `scripts/gazebo_chassis_pose_diffdrive_test.py --profile posture-only`;
-   - 脚本使用当前自然 hip 姿态作为 `initial`，测试结束回到该姿态；
-   - 旧 effort hold、wheel contact lab 和 fixed-hip 诊断路径已删除，不作为当前 baseline gate。
+- `posture_policy_node`;
+- loads only `50D/6D` active-suspension actors;
+- publishes only hip targets;
+- never publishes wheel targets.
 
-10. RL Stage B 为结构化轮速补偿 + 直接髋关节目标：
-   - Gazebo 中 hip 由 trajectory controller 执行 RL 发布的 bounded target；
-   - stop-turn-drive + 传统 skid-steer controller 负责 `/cmd_vel -> wheel_target`；
-   - actor action 前 3 路输出结构化轮速补偿：
-     `track_scale_delta`, `left_drive_scale_delta`, `right_drive_scale_delta`；
-   - actor action 后 6 路输出 `fl/fr/ml/mr/rl/rr` hip target；
-   - 最终轮速限幅从 actor `.npz` metadata 读取；
-   - hip target clamp 从 actor `.npz` metadata 读取，当前 Stage B baseline 使用 0.30 rad；
-   - 先验证 `cmd_vx/cmd_wz` obedience；
-   - 进入 Gazebo 前必须通过 `scripts/isaac_eval_gate.py`，不能只看 reward
-     或最后 checkpoint。
+## Acceptance Order
 
-## 后续验证
+1. xacro generates URDF for `tarantula_v3.urdf.xacro`.
+2. Gazebo spawn is stable on flat terrain.
+3. Direct wheel/hip acceptance profiles still pass.
+4. Classical `/cmd_vel` straight and pure-turn behavior remains usable.
+5. SLAM/Nav smoke runs on the generated Nav2/Gazebo baseline maze.
+6. No-RL posture baseline is recorded.
+7. RL active suspension improves roll/pitch or scan stability without visible hip jitter.
 
-- Gazebo：RL low-speed flat / single bump / side step / rough terrain 行为。
-- Gazebo physics baseline：v2 GUI + `gazebo_chassis_pose_diffdrive_test.py`。
-- Wheel collision A/B：默认 `sphere`，只在接触物理复核时切换 `wheel_collision:=cylinder`，其他 launch
-  参数、地形、hip profile 和 benchmark 序列保持一致。
-- Isaac：重新生成 USD 后检查 obs/action 无 NaN。
-- 对齐项：轮速响应、轮端力分布、同一地形的 roll/pitch RMS、关节力矩饱和率。
+## Explicit Non-Goals
 
-## 暂不改动
-
-- 2-DOF 腿：先把单自由度摆臂的执行器、轮载、轮胎接触和奖励闭环做干净。
-- 地形高程图：本轮先不加，下一阶段评估 blind + wheel load 是否足够。
-
-## Gazebo Baseline Tune
-
-目标：让 generated heightmap baseline 中的粗糙块、横坡、低台阶和浅沟有更稳定、
-可解释的车辆响应。本轮不改拓扑，只调可追踪的物理参数。
-
-改动：
-
-- wheel radius: `0.12 -> 0.13 m`
-  - 目的：提高台阶/碎石通过裕度，降低轮端 collision 在小障碍上的卡滞概率。
-  - 同步：`controllers_v2_position.yaml`、`motion_control_node.py`、`suspension_env_cfg.py`。
-- wheel width/mass: `0.07 -> 0.075 m`, `1.5 -> 1.7 kg`
-  - 目的：让轮子视觉和惯量更接近越障轮，不让轮端过轻导致接触尖峰过敏。
-- body COM z: `0.0 -> -0.025 m`
-  - 目的：在不改变外形的情况下提高横坡和碎石上的抗翻滚裕度。
-- suspension actuator: `kp 120 -> 130 Nm/rad`, `kd 8 -> 11 Nms/rad`,
-  effort limit `60 -> 75 Nm`
-  - 目的：增加前方组合障碍中的姿态保持和冲击阻尼；仍保留硬限位 `±0.6 rad`。
-  - 同步：URDF、Gazebo RL 显式 PD、Isaac joint drive。
-- wheel joint effort: `30 -> 38 Nm`
-  - 目的：避免低摩擦后接台阶时轮速控制过早力矩饱和。
-  - 同步：Isaac wheel velocity-drive gain `10.0 -> 12.7`。
-- Gazebo tire contact: `mu1 1.2 -> 1.35`, `mu2 0.8 -> 1.05`, `kd 100 -> 140`
-  - 目的：球形轮接触下补偿横向抓地不足，并增加接触阻尼。
-
-验收重点：
-
-- 默认 spawn 后直接前进，应能在 generated `gazebo_demo/42` 上产生稳定前进；
-- 观察是否有弹飞、横向滑落、悬挂力矩长时间饱和、台阶后无法恢复；
-- 若仍托底，下一轮优先调腹部 collision / arm length；
-- 若仍翻滚，下一轮优先调 COM、track width 或 suspension target limit；
-- 若轮速发散，下一轮优先调 wheel effort / velocity-drive gain / friction。
+- no passive rocker or spring visual/mechanism in the current baseline;
+- no RL wheel speed residual;
+- no terrain contact truth as policy input;
+- no gait/foot placement controller;
+- no claim of high-step or deep-trench traversal.

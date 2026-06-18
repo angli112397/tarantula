@@ -12,6 +12,9 @@ controller_manager:
     wheel_velocity_controller:
       type: velocity_controllers/JointGroupVelocityController
 
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
 suspension_controller:
   ros__parameters:
     use_sim_time: true
@@ -45,3 +48,33 @@ wheel_velocity_controller:
       - wheel_mr_joint
       - wheel_rl_joint
       - wheel_rr_joint
+
+diff_drive_controller:
+  ros__parameters:
+    use_sim_time: true
+    left_wheel_names:
+      - wheel_fl_joint
+      - wheel_ml_joint
+      - wheel_rl_joint
+    right_wheel_names:
+      - wheel_fr_joint
+      - wheel_mr_joint
+      - wheel_rr_joint
+    wheels_per_side: 3
+    wheel_radius: 0.13
+    wheel_separation: 0.66
+    wheel_separation_multiplier: 1.166
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+    use_stamped_vel: false
+    position_feedback: false
+    open_loop: false
+    enable_odom_tf: true
+    publish_limited_velocity: true
+    cmd_vel_timeout: 0.5
+    publish_rate: 50.0
+    velocity_rolling_window_size: 10
+    odom_frame_id: odom
+    base_frame_id: base_link
+    pose_covariance_diagonal: [0.001, 0.001, 0.0, 0.0, 0.0, 0.03]
+    twist_covariance_diagonal: [0.001, 0.001, 0.0, 0.0, 0.0, 0.03]

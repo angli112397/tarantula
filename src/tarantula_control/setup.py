@@ -19,9 +19,10 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'gazebo_truth_odometry = tarantula_control.gazebo_truth_odometry:main',
             'motion_control_node = tarantula_control.motion_control_node:main',
+            'posture_policy_node = tarantula_control.posture_policy_node:main',
             'scan_gate = tarantula_control.scan_gate:main',
+            'wheel_odometry_node = tarantula_control.wheel_odometry_node:main',
         ],
     },
 )

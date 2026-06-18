@@ -80,19 +80,17 @@ def _add_smooth_noise(height, x, y, rng, amp, waves):
 
 
 def _soften_edges(height, passes=2):
+    # Edge-replicate padding avoids np.roll wrap-around contamination at borders.
     smoothed = height.copy()
     for _ in range(passes):
+        pad = np.pad(smoothed, 1, mode="edge")
         smoothed = (
-            smoothed
-            + np.roll(smoothed, 1, axis=0)
-            + np.roll(smoothed, -1, axis=0)
-            + np.roll(smoothed, 1, axis=1)
-            + np.roll(smoothed, -1, axis=1)
+            pad[1:-1, 1:-1]
+            + pad[0:-2, 1:-1]
+            + pad[2:,   1:-1]
+            + pad[1:-1, 0:-2]
+            + pad[1:-1, 2:]
         ) / 5.0
-        smoothed[0, :] = height[0, :]
-        smoothed[-1, :] = height[-1, :]
-        smoothed[:, 0] = height[:, 0]
-        smoothed[:, -1] = height[:, -1]
     return smoothed
 
 

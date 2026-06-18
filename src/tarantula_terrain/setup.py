@@ -19,6 +19,7 @@ setup(
     entry_points={
         'console_scripts': [
             'generate_terrain = tarantula_terrain.generate:main',
+            'generate_nav_maze = tarantula_terrain.nav_maze:main',
         ],
     },
 )

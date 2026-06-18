@@ -35,7 +35,7 @@ Visualization Manager:
       Name: Odometry
       Enabled: true
       Topic:
-        Value: /tarantula/truth_odom
+        Value: /odometry/filtered
       Keep: 200
   Tools:
     - Class: rviz_default_plugins/MoveCamera

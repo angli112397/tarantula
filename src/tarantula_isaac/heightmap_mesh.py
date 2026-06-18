@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from tarantula_control.vehicle_geometry import VEHICLE_GEOMETRY
+
 
 def heightmap_to_trimesh(height: np.ndarray, resolution: float):
     """Convert meters-valued Tarantula heightmap to centered trimesh."""
@@ -76,7 +78,10 @@ def origins_from_metadata(
 
     size_x = float(metadata["size_x"])
     size_y = float(metadata["size_y"])
-    margin = max(1.5, float(metadata.get("spawn_clear_radius", 0.9)) + 0.8)
+    margin = max(
+        1.5 * VEHICLE_GEOMETRY.reference_length,
+        float(metadata.get("spawn_clear_radius", 0.9)) + 0.75 * VEHICLE_GEOMETRY.reference_length,
+    )
     if spawn_xy_margin is not None:
         margin = max(margin, float(spawn_xy_margin))
     cols = int(np.ceil(np.sqrt(num_envs)))

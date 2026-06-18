@@ -3,17 +3,29 @@
 from dataclasses import dataclass
 
 from .suspension_core import LEGS
+from .vehicle_geometry import VEHICLE_GEOMETRY
 
 
-WHEEL_RADIUS = 0.13
-WHEEL_SEPARATION = 0.64
-WHEEL_SEPARATION_MULTIPLIER = 1.6
-EFFECTIVE_TRACK = WHEEL_SEPARATION * WHEEL_SEPARATION_MULTIPLIER
-YAW_AUTHORITY_MULTIPLIER = 4.0
+WHEEL_RADIUS = VEHICLE_GEOMETRY.wheel_radius       # 0.13 m (tarantula_common.xacro)
+WHEEL_SEPARATION = VEHICLE_GEOMETRY.wheel_center_track  # 0.66 m (2*(pivot_y + wheel_lateral_offset))
+
+# Calibrated skid-steer effective track multiplier. Physical track is 0.66 m;
+# wheel-slip geometry in Gazebo increases the measured yaw authority.
+# Combined with pure_turn_track_scale (0.7287) in MotionControlConfig:
+#   turn_track = 0.66 * 1.6 * 0.7287 = 0.770 m  (calibrated from yaw-rate tests)
+SKID_STEER_EFFECTIVE_TRACK_MULTIPLIER = 1.6
+EFFECTIVE_TRACK = WHEEL_SEPARATION * SKID_STEER_EFFECTIVE_TRACK_MULTIPLIER  # 1.056 m base
+
+DEFAULT_TRACK_SCALE = 1.0
+
+# Wheel speed cap: vx_max / wheel_radius = 0.78 m/s → 6.0 rad/s provides ~25% headroom
+# above nav2 max (0.6 m/s). URDF joint velocity limit is 30 rad/s.
 MAX_ABS_WHEEL_OMEGA = 6.0
-TRACK_SCALE_DELTA_LIMIT = 0.30
-DRIVE_SCALE_DELTA_LIMIT = 0.20
 
+# Calibrated wheel-load reference for F/T normalization (RL observation).
+# 23.1 kg is the measured effective supported mass per 6-wheel average at nominal
+# suspension angle; total robot mass is ~33 kg but unsprung arm/wheel mass shifts
+# the per-wheel contact load distribution.
 NOMINAL_WHEEL_LOAD = 23.1 * 9.81 / 6.0
 
 LEFT_LEGS = ("fl", "ml", "rl")
@@ -52,7 +64,7 @@ def skid_steer_wheel_speeds(
     cmd_vx: float,
     cmd_wz: float,
     *,
-    track_scale: float = YAW_AUTHORITY_MULTIPLIER,
+    track_scale: float = DEFAULT_TRACK_SCALE,
     left_scale: float = 1.0,
     right_scale: float = 1.0,
 ) -> list[float]:

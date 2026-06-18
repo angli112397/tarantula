@@ -11,14 +11,14 @@ from launch_ros.actions import Node
 def generate_launch_description():
     """SLAM 在线建图 + Nav2 导航（先 ros2 launch tarantula_bringup sim.launch.py）。
 
-    自建最小 Nav2 bringup 而非 include nav2_bringup：controller_server
-    和 behavior_server 都直接向机器人标准入口 /cmd_vel 发速度指令，
-    不再经过 diff_drive_controller。
-    map->odom 由 slam_toolbox 提供，无 AMCL/map_server。
+    自建最小 Nav2 bringup 而非 include nav2_bringup。map->odom 由
+    slam_toolbox 提供，无 AMCL/map_server；cmd_vel 和 odom topic 通过
+    launch 参数选择，便于接官方 diff_drive_controller 或项目自定义主控。
     """
     bringup_dir = get_package_share_directory('tarantula_bringup')
     params_file = LaunchConfiguration('params_file')
-    cmd_vel_remap = ('cmd_vel', '/cmd_vel')
+    cmd_vel_remap = ('cmd_vel', LaunchConfiguration('cmd_vel_topic'))
+    odom_override = {'odom_topic': LaunchConfiguration('odom_topic')}
 
     # 姿态门控扫描过滤：倾斜帧打地的幻影障碍会堵死 costmap（见 scan_gate.py）
     scan_gate = Node(
@@ -33,7 +33,7 @@ def generate_launch_description():
     controller = Node(
         package='nav2_controller',
         executable='controller_server',
-        parameters=[params_file],
+        parameters=[params_file, odom_override],
         remappings=[cmd_vel_remap],
         output='screen')
 
@@ -53,7 +53,7 @@ def generate_launch_description():
     bt_navigator = Node(
         package='nav2_bt_navigator',
         executable='bt_navigator',
-        parameters=[params_file],
+        parameters=[params_file, odom_override],
         output='screen')
 
     lifecycle_manager = Node(
@@ -69,6 +69,12 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('params_file', default_value=os.path.join(
             bringup_dir, 'config', 'nav2.yaml')),
+        DeclareLaunchArgument(
+            'cmd_vel_topic', default_value='/cmd_vel',
+            description='Nav2 controller output topic; use /diff_drive_controller/cmd_vel_unstamped for official diff_drive_controller'),
+        DeclareLaunchArgument(
+            'odom_topic', default_value='/odometry/filtered',
+            description='Nav2 odometry topic; use /diff_drive_controller/odom for official diff_drive_controller'),
         scan_gate,
         slam,
         controller,

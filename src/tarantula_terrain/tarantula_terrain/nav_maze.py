@@ -1,0 +1,362 @@
+"""Generate aligned navigation occupancy maps and Gazebo maze worlds.
+
+The output uses the same world coordinate convention as Tarantula heightmaps:
+the map is centered at (0, 0), with x spanning size_x and y spanning size_y.
+This lets a future RL height layer and a navigation occupancy layer share one
+grid and be combined without coordinate conversion.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from .exporters import export_height_assets, export_navigation_world_sdf, export_obj, export_terrain_sdf
+from .terrain_cfg import RL_CURRICULUM
+
+
+@dataclass(frozen=True)
+class NavMazeCfg:
+    size_x: float = RL_CURRICULUM.size_x
+    size_y: float = RL_CURRICULUM.size_y
+    resolution: float = RL_CURRICULUM.resolution
+    wall_thickness: float = 0.22
+    wall_height: float = 1.10
+    door_width: float = 5.20
+    min_corridor_width: float = 4.80
+    obstacle_count: int = 3
+
+    @property
+    def nx(self) -> int:
+        return int(round(self.size_x / self.resolution)) + 1
+
+    @property
+    def ny(self) -> int:
+        return int(round(self.size_y / self.resolution)) + 1
+
+
+# Pad positions designed for the default 24x16 arena.
+# The navigation maze is intentionally a large-chassis baseline, not a tight
+# clearance benchmark. The robot starts at the world origin in a broad clear
+# zone; goals sit in different quadrants so static-map Nav2 and online SLAM
+# both exercise turning, corridor choice, and loop-closing-friendly geometry.
+_PAD_POSITIONS: tuple[tuple[float, float], ...] = (
+    (0.0, 0.0),     # spawn: origin baseline
+    (7.8, 5.2),     # goal:  NE room
+    (-8.2, 5.0),    # goal:  NW room
+    (8.0, -5.0),    # goal:  SE room
+    (-8.0, -5.2),   # goal:  SW room
+)
+_PAD_CLEAR_SIZE = 4.8  # m — enough room for skid-steer turns without wall contact
+
+
+def _world_to_index(value: float, size: float, resolution: float, limit: int) -> int:
+    return int(np.clip(round((value + size / 2.0) / resolution), 0, limit - 1))
+
+
+def _mark_rect(occ: np.ndarray, cfg: NavMazeCfg, cx: float, cy: float, sx: float, sy: float) -> None:
+    x0 = _world_to_index(cx - sx / 2.0, cfg.size_x, cfg.resolution, cfg.nx)
+    x1 = _world_to_index(cx + sx / 2.0, cfg.size_x, cfg.resolution, cfg.nx)
+    y0 = _world_to_index(cy - sy / 2.0, cfg.size_y, cfg.resolution, cfg.ny)
+    y1 = _world_to_index(cy + sy / 2.0, cfg.size_y, cfg.resolution, cfg.ny)
+    occ[y0 : y1 + 1, x0 : x1 + 1] = True
+
+
+def _clear_rect(occ: np.ndarray, cfg: NavMazeCfg, cx: float, cy: float, sx: float, sy: float) -> None:
+    x0 = _world_to_index(cx - sx / 2.0, cfg.size_x, cfg.resolution, cfg.nx)
+    x1 = _world_to_index(cx + sx / 2.0, cfg.size_x, cfg.resolution, cfg.nx)
+    y0 = _world_to_index(cy - sy / 2.0, cfg.size_y, cfg.resolution, cfg.ny)
+    y1 = _world_to_index(cy + sy / 2.0, cfg.size_y, cfg.resolution, cfg.ny)
+    occ[y0 : y1 + 1, x0 : x1 + 1] = False
+
+
+def _add_wall(rects: list[dict], occ: np.ndarray, cfg: NavMazeCfg, name: str, cx: float, cy: float, sx: float, sy: float) -> None:
+    rects.append({"name": name, "center": [round(cx, 3), round(cy, 3)], "size": [round(sx, 3), round(sy, 3)]})
+    _mark_rect(occ, cfg, cx, cy, sx, sy)
+
+
+def _add_segmented_vertical_wall(
+    rects: list[dict],
+    occ: np.ndarray,
+    cfg: NavMazeCfg,
+    name: str,
+    x: float,
+    y_min: float,
+    y_max: float,
+    doors: list[float],
+) -> None:
+    doors = sorted(float(v) for v in doors)
+    cursor = y_min
+    for door in doors:
+        seg_end = max(cursor, door - cfg.door_width / 2.0)
+        if seg_end - cursor >= cfg.min_corridor_width * 0.25:
+            cy = 0.5 * (cursor + seg_end)
+            _add_wall(rects, occ, cfg, f"{name}_{len(rects):03d}", x, cy, cfg.wall_thickness, seg_end - cursor)
+        cursor = min(y_max, door + cfg.door_width / 2.0)
+    if y_max - cursor >= cfg.min_corridor_width * 0.25:
+        cy = 0.5 * (cursor + y_max)
+        _add_wall(rects, occ, cfg, f"{name}_{len(rects):03d}", x, cy, cfg.wall_thickness, y_max - cursor)
+
+
+def _add_segmented_horizontal_wall(
+    rects: list[dict],
+    occ: np.ndarray,
+    cfg: NavMazeCfg,
+    name: str,
+    y: float,
+    x_min: float,
+    x_max: float,
+    doors: list[float],
+) -> None:
+    doors = sorted(float(v) for v in doors)
+    cursor = x_min
+    for door in doors:
+        seg_end = max(cursor, door - cfg.door_width / 2.0)
+        if seg_end - cursor >= cfg.min_corridor_width * 0.25:
+            cx = 0.5 * (cursor + seg_end)
+            _add_wall(rects, occ, cfg, f"{name}_{len(rects):03d}", cx, y, seg_end - cursor, cfg.wall_thickness)
+        cursor = min(x_max, door + cfg.door_width / 2.0)
+    if x_max - cursor >= cfg.min_corridor_width * 0.25:
+        cx = 0.5 * (cursor + x_max)
+        _add_wall(rects, occ, cfg, f"{name}_{len(rects):03d}", cx, y, x_max - cursor, cfg.wall_thickness)
+
+
+def _nearest_free(occ: np.ndarray, cfg: NavMazeCfg, x: float, y: float) -> list[float]:
+    ix = _world_to_index(x, cfg.size_x, cfg.resolution, cfg.nx)
+    iy = _world_to_index(y, cfg.size_y, cfg.resolution, cfg.ny)
+    if not bool(occ[iy, ix]):
+        return [round(x, 3), round(y, 3), 0.0]
+    yy, xx = np.where(~occ)
+    dist = (xx - ix) ** 2 + (yy - iy) ** 2
+    best = int(np.argmin(dist))
+    wx = float(xx[best] * cfg.resolution - cfg.size_x / 2.0)
+    wy = float(yy[best] * cfg.resolution - cfg.size_y / 2.0)
+    return [round(wx, 3), round(wy, 3), 0.0]
+
+
+def _trim_rects_around_pads(rects: list[dict]) -> list[dict]:
+    """Split wall rects so that no SDF box occupies any navigation pad area.
+
+    _clear_rect only fixes the occupancy grid; this fixes the Gazebo geometry.
+    Horizontal rects are split in x; vertical rects are split in y.
+    Slivers narrower than wall_thickness are discarded.
+    Boundary walls are never trimmed — pad positions can be near corners.
+    """
+    half_pad = _PAD_CLEAR_SIZE / 2.0
+    min_keep = 0.22  # m — don't keep slivers thinner than a wall
+    result = []
+    for rect in rects:
+        if rect["name"].startswith("boundary_"):
+            result.append(rect)
+            continue
+        cx, cy = float(rect["center"][0]), float(rect["center"][1])
+        sx, sy = float(rect["size"][0]), float(rect["size"][1])
+        # Work with AABB segments: list of (x0, x1, y0, y1, name)
+        segments = [(cx - sx / 2.0, cx + sx / 2.0, cy - sy / 2.0, cy + sy / 2.0, rect["name"])]
+        for px, py in _PAD_POSITIONS:
+            px0, px1 = px - half_pad, px + half_pad
+            py0, py1 = py - half_pad, py + half_pad
+            next_segs = []
+            for x0, x1, y0, y1, name in segments:
+                if x1 <= px0 or x0 >= px1 or y1 <= py0 or y0 >= py1:
+                    next_segs.append((x0, x1, y0, y1, name))
+                    continue
+                # Overlapping: split along the longer axis to avoid small slivers.
+                if (x1 - x0) >= (y1 - y0):  # horizontal — split in x
+                    if x0 < px0:
+                        next_segs.append((x0, px0, y0, y1, name + "_L"))
+                    if x1 > px1:
+                        next_segs.append((px1, x1, y0, y1, name + "_R"))
+                else:  # vertical — split in y
+                    if y0 < py0:
+                        next_segs.append((x0, x1, y0, py0, name + "_B"))
+                    if y1 > py1:
+                        next_segs.append((x0, x1, py1, y1, name + "_T"))
+            segments = next_segs
+        for x0, x1, y0, y1, name in segments:
+            w, h = x1 - x0, y1 - y0
+            if w >= min_keep and h >= min_keep:
+                result.append({
+                    "name": name,
+                    "center": [round((x0 + x1) / 2.0, 3), round((y0 + y1) / 2.0, 3)],
+                    "size": [round(w, 3), round(h, 3)],
+                })
+    return result
+
+
+def generate_nav_maze(cfg: NavMazeCfg, seed: int) -> tuple[np.ndarray, np.ndarray, list[dict], dict]:
+    rng = np.random.default_rng(seed)
+    occ = np.zeros((cfg.ny, cfg.nx), dtype=bool)
+    rects: list[dict] = []
+
+    # Outer walls keep SLAM features inside lidar range and make map boundaries explicit.
+    _add_wall(rects, occ, cfg, "boundary_north", 0.0, cfg.size_y / 2.0, cfg.size_x, cfg.wall_thickness)
+    _add_wall(rects, occ, cfg, "boundary_south", 0.0, -cfg.size_y / 2.0, cfg.size_x, cfg.wall_thickness)
+    _add_wall(rects, occ, cfg, "boundary_east", cfg.size_x / 2.0, 0.0, cfg.wall_thickness, cfg.size_y)
+    _add_wall(rects, occ, cfg, "boundary_west", -cfg.size_x / 2.0, 0.0, cfg.wall_thickness, cfg.size_y)
+
+    x_min = -cfg.size_x / 2.0 + cfg.wall_thickness
+    x_max = cfg.size_x / 2.0 - cfg.wall_thickness
+    y_min = -cfg.size_y / 2.0 + cfg.wall_thickness
+    y_max = cfg.size_y / 2.0 - cfg.wall_thickness
+
+    # Seeded segmented-wall layout: richer than a hand-placed demo map, but
+    # still wide enough for the current skid-steer chassis. The center safety
+    # pad is cleared after generation and then trimmed out of the Gazebo SDF.
+    vwall_xs = (-cfg.size_x / 4.0, 0.0, cfg.size_x / 4.0)
+    hwall_ys = (-cfg.size_y / 4.0, 0.0, cfg.size_y / 4.0)
+
+    for x in vwall_xs:
+        door_count = 3 if abs(x) > 1.0 else 2
+        doors = list(rng.choice(np.linspace(y_min + 2.2, y_max - 2.2, 7), size=door_count, replace=False))
+        doors.append(0.0)
+        _add_segmented_vertical_wall(rects, occ, cfg, f"vwall_{x:g}", x, y_min, y_max, doors)
+
+    for y in hwall_ys:
+        door_count = 3 if abs(y) > 1.0 else 2
+        doors = list(rng.choice(np.linspace(x_min + 2.5, x_max - 2.5, 8), size=door_count, replace=False))
+        doors.append(0.0)
+        _add_segmented_horizontal_wall(rects, occ, cfg, f"hwall_{y:g}", y, x_min, x_max, doors)
+
+    # Block obstacles: avoid pad areas and any existing wall rect to prevent Gazebo
+    # physics ejection (blocks spawning inside walls bounce upward at startup).
+    for i in range(cfg.obstacle_count):
+        for _ in range(30):
+            bsx = float(rng.uniform(0.45, 0.9))
+            bsy = float(rng.uniform(0.45, 0.9))
+            cx = float(rng.uniform(x_min + 1.5, x_max - 1.5))
+            cy = float(rng.uniform(y_min + 1.5, y_max - 1.5))
+            half_pad = _PAD_CLEAR_SIZE / 2.0 + 0.5
+            if any(abs(cx - px) < half_pad and abs(cy - py) < half_pad for px, py in _PAD_POSITIONS):
+                continue
+            if any(
+                abs(cx - float(r["center"][0])) < (bsx + float(r["size"][0])) / 2.0
+                and abs(cy - float(r["center"][1])) < (bsy + float(r["size"][1])) / 2.0
+                for r in rects
+            ):
+                continue
+            _add_wall(rects, occ, cfg, f"block_{i:02d}", cx, cy, bsx, bsy)
+            break
+
+    # Clear flat navigation pads at spawn and goal positions (occupancy only).
+    for cx, cy in _PAD_POSITIONS:
+        _clear_rect(occ, cfg, cx, cy, _PAD_CLEAR_SIZE, _PAD_CLEAR_SIZE)
+
+    height = np.zeros((cfg.ny, cfg.nx), dtype=np.float32)
+    spawn_pad = _PAD_POSITIONS[0]
+    metadata = {
+        "preset": "nav_maze",
+        "seed": seed,
+        "size_x": cfg.size_x,
+        "size_y": cfg.size_y,
+        "resolution": cfg.resolution,
+        "height_min": 0.0,
+        "height_max": 0.0,
+        "occupancy_shape": [cfg.ny, cfg.nx],
+        "occupancy_convention": "False/free, True/occupied; map.pgm uses white/free and black/occupied",
+        "wall_height": cfg.wall_height,
+        "wall_thickness": cfg.wall_thickness,
+        "door_width": cfg.door_width,
+        "min_corridor_width": cfg.min_corridor_width,
+        "obstacle_count": cfg.obstacle_count,
+        "layering": {
+            "height_layer": "height.npy",
+            "occupancy_layer": "occupancy.npy",
+            "gazebo_world": "world.sdf",
+            "nav2_map": "map.yaml",
+        },
+        "spawn": _nearest_free(occ, cfg, spawn_pad[0], spawn_pad[1]),
+        "goals": [
+            {"name": "north_east", "xyz": _nearest_free(occ, cfg, _PAD_POSITIONS[1][0], _PAD_POSITIONS[1][1])},
+            {"name": "north_west", "xyz": _nearest_free(occ, cfg, _PAD_POSITIONS[2][0], _PAD_POSITIONS[2][1])},
+            {"name": "south_east", "xyz": _nearest_free(occ, cfg, _PAD_POSITIONS[3][0], _PAD_POSITIONS[3][1])},
+            {"name": "south_west", "xyz": _nearest_free(occ, cfg, _PAD_POSITIONS[4][0], _PAD_POSITIONS[4][1])},
+        ],
+        "wall_rects": rects,
+    }
+    return height, occ, rects, metadata
+
+
+def _write_pgm(path: Path, occ: np.ndarray) -> None:
+    # ROS map_server treats image column 0 as origin.x and image row 0 as the
+    # map's top row. Our occupancy rows are stored south-to-north, so only rows
+    # are flipped when writing the image; x columns stay in Gazebo/world order.
+    image = np.where(occ[::-1, :], 0, 254).astype(np.uint8)
+    with path.open("wb") as f:
+        f.write(f"P5\n{image.shape[1]} {image.shape[0]}\n255\n".encode("ascii"))
+        f.write(image.tobytes())
+
+
+def export_nav_maze(out_dir: Path, height: np.ndarray, occ: np.ndarray, rects: list[dict], metadata: dict) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    export_height_assets(out_dir, height, metadata)
+    np.save(out_dir / "occupancy.npy", occ.astype(np.bool_))
+    _write_pgm(out_dir / "map.pgm", occ)
+    (out_dir / "map.yaml").write_text(
+        "\n".join(
+            [
+                "image: map.pgm",
+                "mode: trinary",
+                f"resolution: {float(metadata['resolution']):.6f}",
+                f"origin: [{-float(metadata['size_x']) / 2.0:.6f}, {-float(metadata['size_y']) / 2.0:.6f}, 0.0]",
+                "negate: 0",
+                "occupied_thresh: 0.65",
+                "free_thresh: 0.25",
+                "",
+            ]
+        ),
+        encoding="ascii",
+    )
+    obj_path = export_obj(out_dir, height, float(metadata["resolution"]))
+    export_terrain_sdf(out_dir, obj_path)
+    # Trim wall rects around pad areas before exporting to SDF — _clear_rect fixes the
+    # occupancy grid, but without trimming the SDF still has boxes over pad positions.
+    sdf_rects = _trim_rects_around_pads(rects)
+    export_navigation_world_sdf(
+        out_dir,
+        sdf_rects,
+        wall_height=float(metadata["wall_height"]),
+    )
+    return out_dir
+
+
+def generate(seed: int, output_root: Path, cfg: NavMazeCfg | None = None) -> Path:
+    cfg = cfg or NavMazeCfg()
+    out_dir = output_root / "nav_maze" / str(seed)
+    height, occ, rects, metadata = generate_nav_maze(cfg, seed)
+    return export_nav_maze(out_dir, height, occ, rects, metadata)
+
+
+def main() -> None:
+    defaults = NavMazeCfg()
+    parser = argparse.ArgumentParser(description="Generate aligned Nav2 occupancy map and Gazebo maze world.")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-root", default="generated/terrains")
+    parser.add_argument("--size-x", type=float, default=defaults.size_x)
+    parser.add_argument("--size-y", type=float, default=defaults.size_y)
+    parser.add_argument("--resolution", type=float, default=defaults.resolution)
+    parser.add_argument("--wall-height", type=float, default=defaults.wall_height)
+    parser.add_argument("--wall-thickness", type=float, default=defaults.wall_thickness)
+    parser.add_argument("--door-width", type=float, default=defaults.door_width)
+    parser.add_argument("--min-corridor-width", type=float, default=defaults.min_corridor_width)
+    parser.add_argument("--obstacle-count", type=int, default=defaults.obstacle_count)
+    args = parser.parse_args()
+    cfg = NavMazeCfg(
+        size_x=args.size_x,
+        size_y=args.size_y,
+        resolution=args.resolution,
+        wall_height=args.wall_height,
+        wall_thickness=args.wall_thickness,
+        door_width=args.door_width,
+        min_corridor_width=args.min_corridor_width,
+        obstacle_count=args.obstacle_count,
+    )
+    out_dir = generate(args.seed, Path(args.output_root), cfg)
+    print(out_dir)
+
+
+if __name__ == "__main__":
+    main()

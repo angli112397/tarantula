@@ -24,7 +24,6 @@ def export_height_assets(out_dir: Path, height: np.ndarray, metadata: dict) -> N
     out_dir.mkdir(parents=True, exist_ok=True)
     np.save(out_dir / "height.npy", height.astype(np.float32))
     _write_png(out_dir / "height.png", height)
-    _write_png(out_dir / "preview.png", height)
     with (out_dir / "metadata.json").open("w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
 
@@ -115,6 +114,96 @@ def _box_model(name: str, pose: str, size: str, color: str) -> str:
           <material><ambient>{color}</ambient><diffuse>{color}</diffuse></material></visual>
       </link>
     </model>"""
+
+
+def export_navigation_world_sdf(
+    out_dir: Path,
+    wall_rects: list[dict],
+    *,
+    wall_height: float,
+    wall_color: str = "0.42 0.43 0.41 1",
+) -> Path:
+    """Export the Nav2 demo world.
+
+    Navigation worlds use a thick flat floor for stable skid-steer contact.
+    The aligned height assets are still exported beside this world for later
+    Gazebo/Isaac composition, but the height mesh is intentionally not included
+    here.
+    """
+
+    world_path = out_dir / "world.sdf"
+    models = []
+    for i, rect in enumerate(wall_rects):
+        cx = float(rect["center"][0])
+        cy = float(rect["center"][1])
+        sx = float(rect["size"][0])
+        sy = float(rect["size"][1])
+        models.append(
+            _box_model(
+                f"nav_wall_{i:03d}",
+                f"{cx:.3f} {cy:.3f} {wall_height / 2.0:.3f} 0 0 0",
+                f"{sx:.3f} {sy:.3f} {wall_height:.3f}",
+                wall_color,
+            )
+        )
+
+    world_path.write_text(
+        f"""<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="generated_nav_maze">
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-forcetorque-system" name="ignition::gazebo::systems::ForceTorque"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+
+    <!-- Top-down camera: east=right, north=up — matches RViz map convention.
+         Camera looks along its local -z; zero RPY aligns local axes with world axes,
+         so local-x=east(right), local-y=north(up), local-(-z)=down(into scene). -->
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>0 0 40 0 0 0</pose>
+      </camera>
+    </gui>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.82 0.82 0.78 1</diffuse>
+      <specular>0.18 0.18 0.16 1</specular>
+      <direction>-0.45 0.20 -0.88</direction>
+    </light>
+
+    <model name="flat_floor">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>50.0 50.0 0.04</size></box></geometry>
+          <pose>0 0 -0.02 0 0 0</pose>
+          <surface><friction><ode><mu>1.50</mu><mu2>1.50</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>50.0 50.0 0.04</size></box></geometry>
+          <pose>0 0 -0.02 0 0 0</pose>
+          <material><ambient>0.34 0.35 0.33 1</ambient><diffuse>0.42 0.43 0.40 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+{''.join(models)}
+  </world>
+</sdf>
+""",
+        encoding="utf-8",
+    )
+    return world_path
 
 
 def export_world_sdf(

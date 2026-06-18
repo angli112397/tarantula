@@ -1,8 +1,8 @@
 # Copyright (c) 2026 Tarantula project
 # SPDX-License-Identifier: BSD-3-Clause
-"""Tarantula rover articulation config for the v2 baseline.
+"""Tarantula rover articulation config for the v3 active-suspension baseline.
 
-The Gazebo and Isaac baselines share ``tarantula_core_v2.urdf.xacro``:
+The Gazebo and Isaac baselines share ``tarantula_core_v3.urdf.xacro``:
 ``susp_*_joint`` is a position-controlled hip trim/posture joint and
 ``wheel_*_joint`` is velocity-driven for direct wheel control.
 """
@@ -19,11 +19,11 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 TARANTULA_USD_DIR = "/tmp/tarantula_usd"
-TARANTULA_USD_NAME = "tarantula_v2_actuated_sphere_wheels.usd"
+TARANTULA_USD_NAME = "tarantula_v3_active_suspension_sphere_wheels.usd"
 TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, TARANTULA_USD_NAME)
 
-# Generated via: xacro tarantula_core_v2.urdf.xacro wheel_collision:=sphere lidar:=false > URDF_PATH
-URDF_PATH = "/tmp/tarantula_v2.urdf"
+# Generated via: xacro tarantula_core_v3.urdf.xacro wheel_collision:=sphere lidar:=false > URDF_PATH
+URDF_PATH = "/tmp/tarantula_v3.urdf"
 URDF_STAMP_PATH = f"{URDF_PATH}.sha256"
 USD_STAMP_PATH = os.path.join(TARANTULA_USD_DIR, f"{TARANTULA_USD_NAME}.sha256")
 
@@ -42,6 +42,7 @@ def _xacro_sources() -> list[Path]:
     urdf_dir = _repo_root() / "src" / "tarantula_description" / "urdf"
     return [
         urdf_dir / "tarantula_core_v2.urdf.xacro",
+        urdf_dir / "tarantula_core_v3.urdf.xacro",
         urdf_dir / "tarantula_chassis_v2.xacro",
         urdf_dir / "tarantula_common.xacro",
     ]
@@ -90,11 +91,11 @@ def _xacro_env() -> dict[str, str]:
 def _ensure_core_urdf(urdf_path: str) -> None:
     """Generate the temporary Isaac URDF from xacro when sources changed."""
     source_paths = _xacro_sources()
-    source_hash = _fingerprint(source_paths, extra="v2;wheel_collision=sphere;lidar=false")
+    source_hash = _fingerprint(source_paths, extra="v3;wheel_collision=sphere;lidar=false")
     if os.path.exists(urdf_path) and _read_stamp(URDF_STAMP_PATH) == source_hash:
         return
 
-    xacro_path = source_paths[0]
+    xacro_path = _repo_root() / "src" / "tarantula_description" / "urdf" / "tarantula_core_v3.urdf.xacro"
     xacro_bin = shutil.which("xacro") or "/opt/ros/humble/bin/xacro"
     if not os.path.exists(xacro_bin):
         raise FileNotFoundError(

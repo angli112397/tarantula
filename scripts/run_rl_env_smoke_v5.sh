@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Stage B Isaac Lab environment smoke test
-# Verifies: obs.shape==(N,53), action_space.shape==(N,9), wheel-force sensor alive, no NaN
+# Active-suspension Isaac Lab environment smoke test
+# Verifies: obs.shape==(N,50), action_space.shape==(N,6), wheel-force sensor alive, no NaN
 # Usage: bash scripts/run_rl_env_smoke_v5.sh
 set -euo pipefail
 
@@ -25,9 +25,11 @@ import torch
 from isaacsim.core.utils.extensions import enable_extension
 enable_extension("isaacsim.asset.importer.urdf")
 # Now Kit is live, safe to import isaaclab sub-modules
+from tarantula_isaac.robot import ensure_tarantula_usd
 from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
 from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
 
+ensure_tarantula_usd()
 cfg = TarantulaSuspensionEnvCfg()
 cfg.scene.num_envs = 16
 cfg.scene.env_spacing = 4.0
@@ -39,16 +41,17 @@ env = TarantulaSuspensionEnv(cfg=cfg)
 obs_dict, _ = env.reset()
 obs = obs_dict["policy"]
 print(f"[smoke] obs.shape = {obs.shape}")
-assert obs.shape == (cfg.scene.num_envs, 53), f"Expected (N,53), got {obs.shape}"
+assert obs.shape == (cfg.scene.num_envs, 50), f"Expected (N,50), got {obs.shape}"
 assert not obs.isnan().any(), "NaN in initial obs!"
 log = env.extras.get("log", {})
 for key in (
     "Episode_Reward/total",
-    "Episode_Reward/tracking_lin_vel",
-    "Episode_Reward/tracking_yaw_rate",
+    "Episode_Reward/orientation",
+    "Episode_Reward/contact_support",
+    "Episode_Reward/wheel_load_balance",
     "Episode_Metric/vx_error_rms",
     "Episode_Metric/wz_error_rms",
-    "Episode_Metric/action_saturation_rate",
+    "Episode_Metric/roll_pitch_rate",
     "Episode_Termination/tilt",
     "Episode_Termination/time_out",
 ):
@@ -58,7 +61,7 @@ print(f"[smoke] action_space = {env.action_space}")
 STEPS = 200
 print(f"[smoke] Stepping {STEPS} steps...")
 for i in range(STEPS):
-    action = torch.rand(cfg.scene.num_envs, 9, device=env.device) * 2 - 1
+    action = torch.rand(cfg.scene.num_envs, 6, device=env.device) * 2 - 1
     obs_dict, rew, term, trunc, info = env.step(action)
     obs = obs_dict["policy"]
     if obs.isnan().any():
@@ -71,7 +74,7 @@ for i in range(STEPS):
         sys.exit(1)
 
 print(f"[smoke] Final obs.shape = {obs.shape}, reward mean = {rew.mean():.3f}")
-print("[smoke] PASS - v5 Stage B env OK (obs=53, action=9, wheel-force sensor, no NaN)")
+print("[smoke] PASS - v5 active-suspension env OK (obs=50, action=6, wheel-force sensor, no NaN)")
 env.close()
 sim_app.close()
 PYEOF

@@ -2,7 +2,7 @@
 <package format="3">
   <name>tarantula_description</name>
   <version>0.1.0</version>
-  <description>URDF/xacro description of the Tarantula v2 six-wheel articulated chassis</description>
+  <description>URDF/xacro description of the Tarantula v3 active-suspension chassis</description>
   <maintainer email="angli23@yahoo.com">ang</maintainer>
   <license>MIT</license>
 

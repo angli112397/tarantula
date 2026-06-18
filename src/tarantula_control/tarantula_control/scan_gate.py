@@ -10,8 +10,11 @@
 订阅  /scan (LaserScan)、/imu/data (Imu)
 发布  scan_gated (LaserScan)
 参数  tilt_gate (rad，默认 0.05 ≈ 3 度)
+参数  output_frame (string，默认 lidar_link)：把 Gazebo scoped sensor frame
+      收敛到 URDF frame。
 """
 import math
+from copy import deepcopy
 
 import rclpy
 from rclpy.node import Node
@@ -26,7 +29,9 @@ class ScanGate(Node):
     def __init__(self):
         super().__init__('scan_gate')
         self.declare_parameter('tilt_gate', 0.05)
+        self.declare_parameter('output_frame', 'lidar_link')
         self.gate = self.get_parameter('tilt_gate').value
+        self.output_frame = str(self.get_parameter('output_frame').value)
         self.tilt = 0.0
         self.dropped = 0
         self.create_subscription(Imu, '/imu/data', self.imu_cb,
@@ -49,7 +54,10 @@ class ScanGate(Node):
                     f'倾斜 {math.degrees(self.tilt):.1f}° 超阈值，丢弃扫描'
                     f'（累计 {self.dropped}）')
             return
-        self.pub.publish(msg)
+        out = deepcopy(msg)
+        if self.output_frame:
+            out.header.frame_id = self.output_frame
+        self.pub.publish(out)
 
 
 def main():

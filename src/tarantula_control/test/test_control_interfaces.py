@@ -3,25 +3,25 @@ import unittest
 import numpy as np
 
 from tarantula_control.control_interfaces import (
-    DRIVE_SCALE_DELTA_LIMIT,
+    DEFAULT_TRACK_SCALE,
     EFFECTIVE_TRACK,
-    TRACK_SCALE_DELTA_LIMIT,
     WHEEL_RADIUS,
     WHEEL_DIRECTION,
-    YAW_AUTHORITY_MULTIPLIER,
     skid_steer_wheel_speeds,
 )
 from tarantula_control.motion_control import (
-    CommandShaper,
-    STAGE_A_OBSERVATION_DIM,
     STAGE_B_OBSERVATION_DIM,
-    MotionMode,
+    STAGE_B_ACTION_DIM,
     MotionControlConfig,
     SkidSteerMotionController,
-    build_stage_a_observation,
+    build_stage_b_observation,
 )
 from tarantula_control.suspension_core import LEGS
 from tarantula_control.suspension_core import blend_hip_targets, posture_profile, validate_hip_targets
+from tarantula_control.vehicle_geometry import VEHICLE_GEOMETRY
+
+
+TEST_HIGH_TURN_TRACK_SCALE = 3.0
 
 
 class ControlInterfacesTest(unittest.TestCase):
@@ -30,6 +30,9 @@ class ControlInterfacesTest(unittest.TestCase):
         self.assertEqual(len(speeds), len(LEGS))
         self.assertTrue(all(abs(v - 2.0) < 1e-9 for v in speeds))
 
+    def test_vehicle_geometry_uses_v3_long_arm_baseline(self):
+        self.assertGreater(VEHICLE_GEOMETRY.overall_length, 1.35)
+
     def test_mean_wheel_forward_velocity_applies_joint_direction(self):
         speeds = {leg: 2.0 * WHEEL_DIRECTION[leg] for leg in LEGS}
         from tarantula_control.control_interfaces import mean_wheel_forward_velocity
@@ -37,16 +40,15 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_yaw_cmd_splits_left_right(self):
         speeds = skid_steer_wheel_speeds(0.0, 0.2)
-        left = -0.5 * EFFECTIVE_TRACK * YAW_AUTHORITY_MULTIPLIER * 0.2 / WHEEL_RADIUS
-        right = 0.5 * EFFECTIVE_TRACK * YAW_AUTHORITY_MULTIPLIER * 0.2 / WHEEL_RADIUS
+        left = -0.5 * EFFECTIVE_TRACK * DEFAULT_TRACK_SCALE * 0.2 / WHEEL_RADIUS
+        right = 0.5 * EFFECTIVE_TRACK * DEFAULT_TRACK_SCALE * 0.2 / WHEEL_RADIUS
         self.assertEqual(speeds, [left, right, left, right, left, right])
 
     def test_yaw_feedback_increases_left_right_split_when_yaw_is_low(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
+            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=2.0,
             max_abs_wheel_omega=10.0,
-            pure_turn_forward_bias=0.0,
         ))
         command = controller.limit_command(0.0, 0.25)
         open_loop = controller.wheel_targets(command, measured_wz=None)
@@ -56,11 +58,10 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_yaw_feedback_resets_when_no_yaw_command(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
+            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=0.0,
             yaw_rate_ki=1.0,
             max_abs_wheel_omega=10.0,
-            pure_turn_forward_bias=0.0,
         ))
         turn = controller.limit_command(0.0, 0.25)
         controller.wheel_targets(turn, measured_wz=0.0, dt=0.5)
@@ -69,54 +70,23 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_motion_controller_slew_limits_final_wheel_targets(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
+            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=0.0,
             max_wheel_accel=10.0,
             max_abs_wheel_omega=10.0,
-            pure_turn_forward_bias=0.0,
         ))
         command = controller.limit_command(0.0, 0.25)
-        wheel = controller.compensated_wheel_targets(command, None, measured_wz=0.0, dt=0.1)
+        wheel = controller.filtered_wheel_targets(command, measured_wz=0.0, dt=0.1)
         self.assertEqual(wheel, [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 
-    def test_pure_turn_forward_bias_adds_common_forward_speed(self):
+    def test_drive_scale_adjusts_classical_forward_gain(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
-            yaw_rate_kp=0.0,
-            max_abs_cmd_wz=0.4,
-            pure_turn_forward_bias=0.16,
+            drive_scale=1.25,
             max_abs_wheel_omega=10.0,
         ))
-        command = controller.limit_command(0.0, 0.2)
-        wheel = controller.wheel_targets(command, measured_wz=None)
-        no_bias = skid_steer_wheel_speeds(0.0, 0.2, track_scale=3.0)
-        expected_delta = (0.16 * (0.2 / 0.4)) / WHEEL_RADIUS
-        self.assertTrue(all(abs((a - b) - expected_delta) < 1e-9 for a, b in zip(wheel, no_bias)))
-
-    def test_motion_controller_adds_bounded_structured_compensation(self):
-        controller = SkidSteerMotionController(MotionControlConfig(max_abs_wheel_omega=6.0))
         command = controller.limit_command(0.26, 0.0)
-        wheel = controller.compensated_wheel_targets(command, np.ones(3, dtype=np.float32))
-        scale = 1.0 + DRIVE_SCALE_DELTA_LIMIT
-        expected = [
-            2.0 * scale,
-            2.0 * scale,
-            2.0 * scale,
-            2.0 * scale,
-            2.0 * scale,
-            2.0 * scale,
-        ]
-        self.assertTrue(all(abs(a - b) < 1e-6 for a, b in zip(wheel, expected)))
-
-    def test_motion_controller_uses_first_three_values_from_stage_b_action(self):
-        controller = SkidSteerMotionController(MotionControlConfig(max_abs_wheel_omega=6.0))
-        command = controller.limit_command(0.26, 0.0)
-        stage_a = np.array([0.0, 1.0, 1.0], dtype=np.float32)
-        stage_b = np.array([0.0, 1.0, 1.0, -1.0, 0.5, 0.25, 0.0, -0.25, 1.0], dtype=np.float32)
-        self.assertEqual(
-            controller.compensated_wheel_targets(command, stage_b),
-            controller.compensated_wheel_targets(command, stage_a),
-        )
+        wheel = controller.filtered_wheel_targets(command)
+        self.assertEqual(wheel, [2.5] * 6)
 
     def test_motion_controller_clamps_compensated_target(self):
         controller = SkidSteerMotionController(MotionControlConfig(
@@ -124,98 +94,35 @@ class ControlInterfacesTest(unittest.TestCase):
             max_abs_wheel_omega=3.0,
         ))
         command = controller.limit_command(0.39, 0.0)
-        wheel = controller.compensated_wheel_targets(command, np.ones(3, dtype=np.float32))
+        wheel = controller.filtered_wheel_targets(command)
         self.assertEqual(wheel, [3.0] * 6)
 
-    def test_track_scale_action_changes_yaw_split(self):
-        controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
-            yaw_rate_kp=0.0,
-            max_abs_wheel_omega=10.0,
-        ))
-        command = controller.limit_command(0.0, 0.2)
-        base = controller.compensated_wheel_targets(command, np.zeros(3, dtype=np.float32))
-        boosted = controller.compensated_wheel_targets(command, np.array([1.0, 0.0, 0.0], dtype=np.float32))
-        self.assertAlmostEqual(abs(boosted[0] / base[0]), 1.0 + TRACK_SCALE_DELTA_LIMIT)
-        self.assertAlmostEqual(abs(boosted[1] / base[1]), 1.0 + TRACK_SCALE_DELTA_LIMIT)
-
-    def test_drive_mode_ignores_track_scale_action(self):
-        controller = SkidSteerMotionController(MotionControlConfig(
-            yaw_rate_kp=0.0,
-            max_abs_wheel_omega=10.0,
-        ))
-        command = controller.limit_command(0.26, 0.0)
-        base = controller.compensated_wheel_targets(command, np.zeros(3, dtype=np.float32))
-        track_only = controller.compensated_wheel_targets(command, np.array([1.0, 0.0, 0.0], dtype=np.float32))
-        drive = controller.compensated_wheel_targets(command, np.array([0.0, 1.0, 1.0], dtype=np.float32))
-        self.assertEqual(track_only, base)
-        self.assertTrue(all(abs(a - 2.0 * (1.0 + DRIVE_SCALE_DELTA_LIMIT)) < 1e-6 for a in drive))
-
-    def test_turn_mode_ignores_drive_scale_actions(self):
-        controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
-            yaw_rate_kp=0.0,
-            max_abs_wheel_omega=10.0,
-        ))
-        command = controller.limit_command(0.0, 0.2)
-        base = controller.compensated_wheel_targets(command, np.zeros(3, dtype=np.float32))
-        drive_only = controller.compensated_wheel_targets(command, np.array([0.0, 1.0, 1.0], dtype=np.float32))
-        track = controller.compensated_wheel_targets(command, np.array([1.0, 0.0, 0.0], dtype=np.float32))
-        self.assertEqual(drive_only, base)
-        self.assertAlmostEqual(abs(track[0] / base[0]), 1.0 + TRACK_SCALE_DELTA_LIMIT)
-
-    def test_stop_mode_ignores_all_compensation_actions(self):
+    def test_stop_mode_outputs_zero_wheels(self):
         controller = SkidSteerMotionController(MotionControlConfig(max_abs_wheel_omega=10.0))
         command = controller.limit_command(0.0, 0.0)
-        wheel = controller.compensated_wheel_targets(command, np.ones(3, dtype=np.float32))
+        wheel = controller.filtered_wheel_targets(command)
         self.assertEqual(wheel, [0.0] * 6)
 
-    def test_command_shaper_stop_turn_drive_hysteresis_rewrites_execution_command(self):
-        controller = SkidSteerMotionController()
-        shaper = CommandShaper(MotionControlConfig(
-            turn_enter_wz=0.08,
-            turn_exit_wz=0.04,
-        ))
-        turn = shaper.shape(controller.limit_command(0.1, 0.10))
-        self.assertEqual(shaper.mode, MotionMode.TURN)
-        self.assertEqual(turn.vx, 0.0)
-        self.assertEqual(turn.wz, 0.10)
-        still_turn = shaper.shape(controller.limit_command(0.1, 0.06))
-        self.assertEqual(shaper.mode, MotionMode.TURN)
-        self.assertEqual(still_turn.vx, 0.0)
-        self.assertEqual(still_turn.wz, 0.06)
-        drive = shaper.shape(controller.limit_command(0.1, 0.02))
-        self.assertEqual(shaper.mode, MotionMode.DRIVE)
-        self.assertEqual(drive.vx, 0.1)
-        self.assertEqual(drive.wz, 0.0)
-
-    def test_command_shaper_stop_turn_drive_stops_when_no_command(self):
-        shaper = CommandShaper()
-        stop = shaper.shape(SkidSteerMotionController().limit_command(0.0, 0.0))
-        self.assertEqual(shaper.mode, MotionMode.STOP)
-        self.assertEqual(stop.vx, 0.0)
-        self.assertEqual(stop.wz, 0.0)
-
-    def test_raw_high_yaw_command_is_shaped_before_wheel_mapping(self):
+    def test_curve_cmd_applies_vx_and_wz_simultaneously(self):
+        """Verify that a blended vx+wz command (Nav2 curve) produces correct differential."""
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=3.0,
-            yaw_rate_kp=0.0,
+            drive_scale=1.0,
+            pure_turn_track_scale=1.0,
             max_abs_wheel_omega=10.0,
         ))
-        shaper = CommandShaper(MotionControlConfig(turn_enter_wz=0.08))
-        execution = shaper.shape(controller.limit_command(0.08, 0.2))
-        base = controller.compensated_wheel_targets(execution, np.zeros(3, dtype=np.float32))
-        boosted = controller.compensated_wheel_targets(execution, np.ones(3, dtype=np.float32))
-        self.assertEqual(execution.vx, 0.0)
-        self.assertEqual(execution.wz, 0.2)
-        self.assertEqual(controller.compensated_wheel_targets(execution, np.array([0.0, 1.0, 1.0], dtype=np.float32)), base)
-        self.assertGreater(abs(boosted[0] - boosted[1]), abs(base[0] - base[1]))
+        command = controller.limit_command(0.2, 0.3)
+        wheel = controller.wheel_targets(command)
+        from tarantula_control.control_interfaces import EFFECTIVE_TRACK, WHEEL_RADIUS
+        expected_left = (0.2 - 0.5 * EFFECTIVE_TRACK * 0.3) / WHEEL_RADIUS
+        expected_right = (0.2 + 0.5 * EFFECTIVE_TRACK * 0.3) / WHEEL_RADIUS
+        self.assertAlmostEqual(wheel[0], expected_left, places=9)   # fl
+        self.assertAlmostEqual(wheel[1], expected_right, places=9)  # fr
 
-    def test_stage_a_observation_layout_is_47d(self):
+    def test_posture_observation_layout_is_50d(self):
         zeros = {leg: 0.0 for leg in LEGS}
         zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
         command = SkidSteerMotionController().limit_command(0.2, 0.1)
-        obs = build_stage_a_observation(
+        obs = build_stage_b_observation(
             projected_gravity_b=(0.0, 0.0, -1.0),
             root_ang_vel_b=(0.0, 0.0, 0.0),
             susp_joint_pos=zeros,
@@ -223,25 +130,26 @@ class ControlInterfacesTest(unittest.TestCase):
             wheel_joint_vel=zeros,
             wheel_force=zero_forces,
             command=command,
-            prev_action=np.zeros(3, dtype=np.float32),
-        )
-        self.assertEqual(obs.shape, (STAGE_A_OBSERVATION_DIM,))
-
-    def test_stage_b_observation_layout_is_53d(self):
-        zeros = {leg: 0.0 for leg in LEGS}
-        zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
-        command = SkidSteerMotionController().limit_command(0.2, 0.1)
-        obs = build_stage_a_observation(
-            projected_gravity_b=(0.0, 0.0, -1.0),
-            root_ang_vel_b=(0.0, 0.0, 0.0),
-            susp_joint_pos=zeros,
-            susp_joint_vel=zeros,
-            wheel_joint_vel=zeros,
-            wheel_force=zero_forces,
-            command=command,
-            prev_action=np.zeros(9, dtype=np.float32),
+            prev_action=np.zeros(STAGE_B_ACTION_DIM, dtype=np.float32),
         )
         self.assertEqual(obs.shape, (STAGE_B_OBSERVATION_DIM,))
+
+    def test_posture_observation_rejects_old_three_dim_prev_action(self):
+        zeros = {leg: 0.0 for leg in LEGS}
+        zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
+        command = SkidSteerMotionController().limit_command(0.2, 0.1)
+
+        with self.assertRaises(ValueError):
+            build_stage_b_observation(
+                projected_gravity_b=(0.0, 0.0, -1.0),
+                root_ang_vel_b=(0.0, 0.0, 0.0),
+                susp_joint_pos=zeros,
+                susp_joint_vel=zeros,
+                wheel_joint_vel=zeros,
+                wheel_force=zero_forces,
+                command=command,
+                prev_action=np.zeros(3, dtype=np.float32),
+            )
 
     def test_posture_profiles_are_bounded_six_leg_targets(self):
         for name in ("neutral", "front_down", "rear_down", "raise", "lower", "left_trim"):

@@ -30,6 +30,8 @@ Visualization Manager:
       Name: Map
       Enabled: true
       Topic:
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
         Value: /map
     - Class: rviz_default_plugins/Map
       Name: GlobalCostmap
@@ -67,7 +69,7 @@ Visualization Manager:
       Name: Odometry
       Enabled: false
       Topic:
-        Value: /tarantula/truth_odom
+        Value: /odometry/filtered
       Keep: 200
   Tools:
     - Class: rviz_default_plugins/MoveCamera

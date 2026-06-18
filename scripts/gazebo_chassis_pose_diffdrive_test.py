@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Gazebo chassis posture and differential-drive acceptance test.
 
-Prerequisite: start Gazebo with the v2 chassis and without motion_control owning
+Prerequisite: start Gazebo with the v3 chassis and without motion_control owning
 wheel commands, for example:
 
   ros2 launch tarantula_bringup sim.launch.py \
-    gui:=true robot_model:=tarantula_v2.urdf.xacro \
-    motion_control:=true start_motion_control:=false rl_compensation_enabled:=false \
+    gui:=true robot_model:=tarantula_v3.urdf.xacro \
+    motion_control:=true start_motion_control:=false posture_policy_enabled:=false \
     wheel_collision:=sphere spawn_z:=0.55
 
-The test drives the current v2 control surface directly:
+The test drives the current v3 control surface directly:
   - /suspension_controller/joint_trajectory for hip/arm angle targets
   - /wheel_velocity_controller/commands for six wheel velocities
 

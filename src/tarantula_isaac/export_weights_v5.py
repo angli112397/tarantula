@@ -3,7 +3,7 @@
 Usage (with isaac_venv active, from repo root):
   python3 src/tarantula_isaac/export_weights_v5.py \\
     --checkpoint logs/rsl_rl/tarantula_suspension/<run>/model_399.pt \\
-    --npz-out generated/policies/cmd_vel_actor.npz
+    --npz-out generated/policies/posture_actor.npz
 """
 
 import argparse
@@ -14,9 +14,6 @@ import sys
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--npz-out", required=True, help="Path to write raw actor weights as .npz.")
-parser.add_argument("--max-abs-wheel-omega", type=float, default=None)
-parser.add_argument("--track-scale-delta-limit", type=float, default=None)
-parser.add_argument("--drive-scale-delta-limit", type=float, default=None)
 parser.add_argument("--hip-action-target-limit", type=float, default=None)
 args = parser.parse_args()
 
@@ -137,31 +134,6 @@ if norm_mean is None:
 
 npz_data["obs_normalizer._mean"] = norm_mean.astype(np.float32)
 npz_data["obs_normalizer._std"]  = norm_std.astype(np.float32)
-max_wheel = (
-    args.max_abs_wheel_omega
-    if args.max_abs_wheel_omega is not None
-    else _read_env_yaml_float(ckpt_path, "max_abs_wheel_omega")
-)
-if max_wheel is None:
-    max_wheel = 6.0
-npz_data["max_abs_wheel_omega"] = np.asarray([max_wheel], dtype=np.float32)
-
-track_delta_limit = (
-    args.track_scale_delta_limit
-    if args.track_scale_delta_limit is not None
-    else _read_env_yaml_float(ckpt_path, "track_scale_delta_limit")
-)
-if track_delta_limit is None:
-    track_delta_limit = 0.30
-drive_delta_limit = (
-    args.drive_scale_delta_limit
-    if args.drive_scale_delta_limit is not None
-    else _read_env_yaml_float(ckpt_path, "drive_scale_delta_limit")
-)
-if drive_delta_limit is None:
-    drive_delta_limit = 0.20
-npz_data["track_scale_delta_limit"] = np.asarray([track_delta_limit], dtype=np.float32)
-npz_data["drive_scale_delta_limit"] = np.asarray([drive_delta_limit], dtype=np.float32)
 hip_action_target_limit = (
     args.hip_action_target_limit
     if args.hip_action_target_limit is not None
@@ -177,12 +149,9 @@ for layer_idx in range(len(linear_layers)):
     print(f"  mlp.{layer_idx}.weight: {npz_data[f'mlp.{layer_idx}.weight'].shape}")
     print(f"  mlp.{layer_idx}.bias:   {npz_data[f'mlp.{layer_idx}.bias'].shape}")
 print(f"  obs mean:     {npz_data['obs_normalizer._mean'].shape}  (expect [{obs_dim}])")
-print(f"  wheel clamp:  {float(npz_data['max_abs_wheel_omega'][0])} rad/s")
-print(f"  track delta:  {float(npz_data['track_scale_delta_limit'][0])}")
-print(f"  drive delta:  {float(npz_data['drive_scale_delta_limit'][0])}")
 print(f"  hip target:   {float(npz_data['hip_action_target_limit'][0])} rad")
-assert (obs_dim, action_dim) in {(47, 3), (53, 9)}, (
-    f"Expected Stage A 47D/3D or Stage B 53D/9D actor, got {obs_dim}D/{action_dim}D"
+assert (obs_dim, action_dim) == (50, 6), (
+    f"Expected active-suspension 50D/6D actor, got {obs_dim}D/{action_dim}D"
 )
 assert npz_data["mlp.0.weight"].shape[1] == obs_dim
 assert npz_data[f"mlp.{last_layer_idx}.weight"].shape[0] == action_dim
@@ -192,4 +161,4 @@ npz_path = pathlib.Path(args.npz_out)
 npz_path.parent.mkdir(parents=True, exist_ok=True)
 np.savez_compressed(npz_path, **npz_data)
 print(f"[export] Raw npz written to: {npz_path}")
-print("[export] DONE - v5 structured-compensation weights exported.")
+print("[export] DONE - v5 active-suspension posture weights exported.")

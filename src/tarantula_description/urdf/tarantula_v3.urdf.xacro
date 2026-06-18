@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="tarantula">
+  <xacro:include filename="$(find tarantula_description)/urdf/tarantula_core_v3.urdf.xacro"/>
+
+  <xacro:macro name="leg_gazebo" params="prefix">
+    <gazebo reference="susp_${prefix}_joint">
+      <sensor name="ft_${prefix}" type="force_torque">
+        <update_rate>50</update_rate>
+        <topic>ft/${prefix}</topic>
+        <force_torque>
+          <frame>parent</frame>
+          <measure_direction>child_to_parent</measure_direction>
+        </force_torque>
+      </sensor>
+    </gazebo>
+    <gazebo reference="wheel_${prefix}_link">
+      <mu1>1.35</mu1>
+      <mu2>0.45</mu2>
+      <fdir1>1 0 0</fdir1>
+      <slip1>0.0</slip1>
+      <slip2>0.08</slip2>
+      <kp>1000000.0</kp>
+      <kd>140.0</kd>
+    </gazebo>
+    <gazebo reference="wheel_${prefix}_joint">
+      <sensor name="ft_wheel_${prefix}" type="force_torque">
+        <update_rate>50</update_rate>
+        <topic>ft_wheel/${prefix}</topic>
+        <force_torque>
+          <frame>parent</frame>
+          <measure_direction>child_to_parent</measure_direction>
+        </force_torque>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:leg_gazebo prefix="fl"/>
+  <xacro:leg_gazebo prefix="fr"/>
+  <xacro:leg_gazebo prefix="ml"/>
+  <xacro:leg_gazebo prefix="mr"/>
+  <xacro:leg_gazebo prefix="rl"/>
+  <xacro:leg_gazebo prefix="rr"/>
+
+  <ros2_control name="GazeboSimSystem" type="system">
+    <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+    <xacro:macro name="susp_iface" params="prefix">
+      <joint name="susp_${prefix}_joint">
+        <command_interface name="position"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+    <xacro:macro name="wheel_iface" params="prefix">
+      <joint name="wheel_${prefix}_joint">
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+
+    <xacro:susp_iface prefix="fl"/><xacro:susp_iface prefix="fr"/>
+    <xacro:susp_iface prefix="ml"/><xacro:susp_iface prefix="mr"/>
+    <xacro:susp_iface prefix="rl"/><xacro:susp_iface prefix="rr"/>
+    <xacro:wheel_iface prefix="fl"/><xacro:wheel_iface prefix="fr"/>
+    <xacro:wheel_iface prefix="ml"/><xacro:wheel_iface prefix="mr"/>
+    <xacro:wheel_iface prefix="rl"/><xacro:wheel_iface prefix="rr"/>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find tarantula_bringup)/config/controllers_v2_position.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <topic>imu</topic>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+    <sensor name="lidar_sensor" type="gpu_lidar">
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+      <topic>scan</topic>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <min_angle>${-PI}</min_angle>
+            <max_angle>${PI}</max_angle>
+          </horizontal>
+        </scan>
+        <range><min>0.20</min><max>12.0</max><resolution>0.01</resolution></range>
+      </ray>
+    </sensor>
+  </gazebo>
+</robot>
