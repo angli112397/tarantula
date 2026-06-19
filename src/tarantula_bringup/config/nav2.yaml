@@ -23,6 +23,7 @@ controller_server:
     progress_checker_plugin: "progress_checker"
     goal_checker_plugins: ["general_goal_checker"]
     controller_plugins: ["FollowPath"]
+    speed_limit_topic: "speed_limit"
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
@@ -46,23 +47,23 @@ controller_server:
       max_vel_y: 0.0
       # 滑移转向原地转大量打滑，转速 >0.6 时 10Hz 扫描匹配跟不上里程计
       # 角度误差（实测 1.0 rad/s 自旋恢复后 map 系转歪 102 度），全局限转速
-      max_vel_theta: 0.6
+      max_vel_theta: 0.35
       min_speed_xy: 0.0
       max_speed_xy: 0.6
       min_speed_theta: 0.0
       acc_lim_x: 0.8
       acc_lim_y: 0.0
-      acc_lim_theta: 1.0
+      acc_lim_theta: 0.55
       decel_lim_x: -0.8
       decel_lim_y: 0.0
-      decel_lim_theta: -1.0
+      decel_lim_theta: -0.55
       vx_samples: 20
       vy_samples: 0
       vtheta_samples: 20
       sim_time: 1.7
       linear_granularity: 0.05
       angular_granularity: 0.025
-      transform_tolerance: 0.4
+      transform_tolerance: 1.0
       xy_goal_tolerance: 0.25
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: true
@@ -71,16 +72,20 @@ controller_server:
       # tightly hugging the geometric shortest path. ObstacleFootprint rejects
       # footprint collisions; inflation and path costs should already steer the
       # global/local plan toward corridor centers before collision is imminent.
-      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign",
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "BaseObstacle", "GoalAlign",
                 "PathAlign", "PathDist", "GoalDist"]
       ObstacleFootprint.scale: 0.10
+      # Use graded local costmap values, not only lethal footprint rejection.
+      # This makes DWB prefer lower terrain-cost trajectories when the rolling
+      # local costmap includes the terrain-aware static layer.
+      BaseObstacle.scale: 0.35
       PathAlign.scale: 18.0
       PathAlign.forward_point_distance: 0.325
       GoalAlign.scale: 16.0
       GoalAlign.forward_point_distance: 0.325
       PathDist.scale: 24.0
       GoalDist.scale: 18.0
-      RotateToGoal.scale: 32.0
+      RotateToGoal.scale: 20.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
 
@@ -101,7 +106,12 @@ local_costmap:
       #   half-width  0.37 m = pivot_y(0.26) + wheel_lateral_offset(0.07) + wheel_width/2(0.037) = 0.367 m
       footprint: "[[0.56, 0.37], [0.56, -0.37], [-0.56, -0.37], [-0.56, 0.37]]"
       footprint_padding: 0.0
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["terrain_static_layer", "obstacle_layer", "inflation_layer"]
+      terrain_static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /terrain_cost_map
+        map_subscribe_transient_local: true
+        trinary_costmap: false
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -138,14 +148,26 @@ global_costmap:
       # 只用 SLAM 静态地图 + 膨胀，不挂 obstacle_layer：车身在坡上倾斜时
       # 2D 雷达扫描面打地产生幻影障碍，若写入全局 costmap 会永久堵路；
       # 局部 costmap 的 raytrace 清除能自愈，全局交给 SLAM 地图本身
-      plugins: ["static_layer", "inflation_layer"]
-      static_layer:
+      plugins: ["terrain_static_layer", "inflation_layer"]
+      filters: ["terrain_speed_filter"]
+      terrain_static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /terrain_cost_map
         map_subscribe_transient_local: true
+        # Preserve scaled terrain costs from terrain_cost_map.yaml. With the
+        # default trinary conversion, Nav2 would collapse the terrain-aware
+        # gray map back into free/occupied cells and lose the traversability cue.
+        trinary_costmap: false
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.5
         inflation_radius: 0.65
+      terrain_speed_filter:
+        plugin: "nav2_costmap_2d::SpeedFilter"
+        enabled: true
+        filter_info_topic: "/speed_costmap_filter_info"
+        speed_limit_topic: "/speed_limit"
+        transform_tolerance: 0.5
       always_send_full_costmap: true
 
 planner_server:
@@ -181,9 +203,9 @@ behavior_server:
       plugin: "nav2_behaviors/Wait"
     global_frame: odom
     robot_base_frame: base_link
-    transform_tolerance: 0.2
+    transform_tolerance: 0.5
     simulate_ahead_time: 2.0
     # 自旋恢复同样受滑移转向打滑约束（见 FollowPath.max_vel_theta 注释）
-    max_rotational_vel: 0.5
+    max_rotational_vel: 0.3
     min_rotational_vel: 0.2
-    rotational_acc_lim: 1.0
+    rotational_acc_lim: 0.55

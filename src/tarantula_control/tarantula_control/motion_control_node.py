@@ -4,9 +4,9 @@ This node owns only planar motion:
 
 ``/cmd_vel -> six wheel velocity targets``.
 
-cmd_vel is passed directly to the skid-steer differential without any
-stop-turn-drive shaping. RL active-suspension runs in a separate node and
-only commands the six hip joints.
+cmd_vel is passed directly to the skid-steer differential, including blended
+``vx+wz`` curve commands. RL active-suspension runs in a separate node and only
+commands the six hip joints.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class MotionControlNode(Node):
         self.declare_parameter("max_abs_cmd_wz", defaults.max_abs_cmd_wz)
         self.declare_parameter("max_abs_wheel_omega", defaults.max_abs_wheel_omega)
         self.declare_parameter("drive_scale", defaults.drive_scale)
-        self.declare_parameter("pure_turn_track_scale", defaults.pure_turn_track_scale)
+        self.declare_parameter("yaw_track_scale", defaults.yaw_track_scale)
         self.declare_parameter("yaw_rate_kp", defaults.yaw_rate_kp)
         self.declare_parameter("yaw_rate_ki", defaults.yaw_rate_ki)
         self.declare_parameter("yaw_integral_limit", defaults.yaw_integral_limit)
@@ -45,7 +45,7 @@ class MotionControlNode(Node):
             max_abs_cmd_wz=float(self.get_parameter("max_abs_cmd_wz").value),
             max_abs_wheel_omega=float(self.get_parameter("max_abs_wheel_omega").value),
             drive_scale=float(self.get_parameter("drive_scale").value),
-            pure_turn_track_scale=float(self.get_parameter("pure_turn_track_scale").value),
+            yaw_track_scale=float(self.get_parameter("yaw_track_scale").value),
             yaw_rate_kp=float(self.get_parameter("yaw_rate_kp").value),
             yaw_rate_ki=float(self.get_parameter("yaw_rate_ki").value),
             yaw_integral_limit=float(self.get_parameter("yaw_integral_limit").value),
@@ -76,7 +76,7 @@ class MotionControlNode(Node):
             "classical motion controller started "
             f"(max_abs_wheel_omega={self.motion_controller.config.max_abs_wheel_omega}, "
             f"drive_scale={self.motion_controller.config.drive_scale}, "
-            f"pure_turn_track_scale={self.motion_controller.config.pure_turn_track_scale}, "
+            f"yaw_track_scale={self.motion_controller.config.yaw_track_scale}, "
             f"yaw_rate_kp={self.motion_controller.config.yaw_rate_kp}, "
             f"yaw_rate_ki={self.motion_controller.config.yaw_rate_ki}, "
             f"max_wheel_accel={self.motion_controller.config.max_wheel_accel}, "
@@ -91,7 +91,7 @@ class MotionControlNode(Node):
                 "max_abs_cmd_wz",
                 "max_abs_wheel_omega",
                 "drive_scale",
-                "pure_turn_track_scale",
+                "yaw_track_scale",
                 "yaw_rate_kp",
                 "yaw_rate_ki",
                 "yaw_integral_limit",

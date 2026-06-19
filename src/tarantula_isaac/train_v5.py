@@ -137,14 +137,16 @@ def main():
     if args.command_profile == "yaw_only":
         env_cfg.command_stop_prob = 0.0
         env_cfg.command_straight_prob = 0.0
-        env_cfg.command_pure_turn_prob = 1.0
+        env_cfg.command_turn_prob = 1.0
+        env_cfg.command_curve_prob = 0.0
         env_cfg.command_mission_prob = 0.0
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_wz = 0.25
     elif args.command_profile == "mission":
         env_cfg.command_stop_prob = 0.20
         env_cfg.command_straight_prob = 0.40
-        env_cfg.command_pure_turn_prob = 0.40
+        env_cfg.command_turn_prob = 0.20
+        env_cfg.command_curve_prob = 0.20
         env_cfg.command_mission_prob = 0.70
         env_cfg.command_vx_range = (-0.16, 0.16)
         env_cfg.command_wz_range = (-0.25, 0.25)
@@ -153,14 +155,14 @@ def main():
     elif args.command_profile == "stage0":
         env_cfg.command_stop_prob = 0.20
         env_cfg.command_straight_prob = 0.40
-        env_cfg.command_pure_turn_prob = 0.40
+        env_cfg.command_turn_prob = 0.20
+        env_cfg.command_curve_prob = 0.20
         env_cfg.command_mission_prob = 0.40
         env_cfg.command_vx_range = (-0.16, 0.16)
         env_cfg.command_wz_range = (-0.25, 0.25)
         env_cfg.command_min_abs_vx = 0.08
         env_cfg.command_min_abs_wz = 0.12
         env_cfg.obs_noise_std = min(float(env_cfg.obs_noise_std), 0.01)
-        env_cfg.push_lin_vel_range = (-0.2, 0.2)
 
     agent_cfg = TarantulaSuspensionPPORunnerCfg()
     agent_cfg.max_iterations = args.max_iterations

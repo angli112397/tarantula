@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage B PPO training - wheel compensation + direct hip targets (obs=53, action=9)
+# Active-suspension PPO training (obs=50, action=6).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,7 +10,7 @@ NUM_ENVS="${NUM_ENVS:-64}"
 LOG=/tmp/tarantula_ppo_v5.log
 LIMIT_KB=$((12*1024*1024))  # 12 GB RSS watchdog
 
-echo "=== Tarantula PPO Training (Stage B wheel + hip compensation) ==="
+echo "=== Tarantula PPO Training (active suspension posture) ==="
 echo "    num_envs=${NUM_ENVS}, log=${LOG}"
 echo "    extra_args: $*"
 

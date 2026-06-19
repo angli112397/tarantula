@@ -9,10 +9,9 @@ from .vehicle_geometry import VEHICLE_GEOMETRY
 WHEEL_RADIUS = VEHICLE_GEOMETRY.wheel_radius       # 0.13 m (tarantula_common.xacro)
 WHEEL_SEPARATION = VEHICLE_GEOMETRY.wheel_center_track  # 0.66 m (2*(pivot_y + wheel_lateral_offset))
 
-# Calibrated skid-steer effective track multiplier. Physical track is 0.66 m;
-# wheel-slip geometry in Gazebo increases the measured yaw authority.
-# Combined with pure_turn_track_scale (0.7287) in MotionControlConfig:
-#   turn_track = 0.66 * 1.6 * 0.7287 = 0.770 m  (calibrated from yaw-rate tests)
+# Calibrated skid-steer effective track multiplier. Physical track is 0.66 m.
+# Combined with yaw_track_scale (0.7287) in MotionControlConfig:
+#   turn_track = 0.66 * 1.6 * 0.7287 = 0.770 m
 SKID_STEER_EFFECTIVE_TRACK_MULTIPLIER = 1.6
 EFFECTIVE_TRACK = WHEEL_SEPARATION * SKID_STEER_EFFECTIVE_TRACK_MULTIPLIER  # 1.056 m base
 

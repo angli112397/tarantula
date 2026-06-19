@@ -32,7 +32,7 @@ class WheelOdometryNode(Node):
         self.declare_parameter("odom_topic", "/wheel/odom")
         self.declare_parameter("frame_id", "odom")
         self.declare_parameter("child_frame_id", "base_link")
-        self.declare_parameter("effective_track_scale", defaults.pure_turn_track_scale)
+        self.declare_parameter("effective_track_scale", defaults.yaw_track_scale)
         self.declare_parameter("publish_rate_limit", 50.0)
 
         self.odom_topic = str(self.get_parameter("odom_topic").value)

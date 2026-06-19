@@ -82,7 +82,22 @@ def export_terrain_sdf(out_dir: Path, obj_path: Path) -> Path:
           <mesh><uri>{mesh_uri}</uri></mesh>
         </geometry>
         <surface>
-          <friction><ode><mu>1.50</mu><mu2>1.50</mu2></ode></friction>
+          <friction>
+            <ode>
+              <mu>1.50</mu>
+              <mu2>1.50</mu2>
+              <slip1>0.001</slip1>
+              <slip2>0.001</slip2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000.0</kp>
+              <kd>10.0</kd>
+              <max_vel>0.2</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
         </surface>
       </collision>
       <visual name="terrain_visual">
@@ -103,6 +118,25 @@ def export_terrain_sdf(out_dir: Path, obj_path: Path) -> Path:
     return sdf_path
 
 
+def _terrain_visual_model(obj_path: Path) -> str:
+    mesh_uri = obj_path.resolve().as_uri()
+    return f"""
+    <model name="terrain_visual_only">
+      <static>true</static>
+      <link name="terrain_visual_link">
+        <visual name="terrain_visual">
+          <geometry>
+            <mesh><uri>{mesh_uri}</uri></mesh>
+          </geometry>
+          <material>
+            <ambient>0.30 0.36 0.32 0.78</ambient>
+            <diffuse>0.36 0.44 0.38 0.78</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>"""
+
+
 def _box_model(name: str, pose: str, size: str, color: str) -> str:
     return f"""
     <model name="{name}">
@@ -121,6 +155,7 @@ def export_navigation_world_sdf(
     wall_rects: list[dict],
     *,
     wall_height: float,
+    terrain_visual_obj: Path | None = None,
     wall_color: str = "0.42 0.43 0.41 1",
 ) -> Path:
     """Export the Nav2 demo world.
@@ -133,6 +168,8 @@ def export_navigation_world_sdf(
 
     world_path = out_dir / "world.sdf"
     models = []
+    if terrain_visual_obj is not None:
+        models.append(_terrain_visual_model(terrain_visual_obj))
     for i, rect in enumerate(wall_rects):
         cx = float(rect["center"][0])
         cy = float(rect["center"][1])
@@ -197,6 +234,74 @@ def export_navigation_world_sdf(
         </visual>
       </link>
     </model>
+{''.join(models)}
+  </world>
+</sdf>
+""",
+        encoding="utf-8",
+    )
+    return world_path
+
+
+def export_navigation_mesh_contact_world_sdf(
+    out_dir: Path,
+    terrain_sdf: Path,
+    wall_rects: list[dict],
+    *,
+    wall_height: float,
+    wall_color: str = "0.42 0.43 0.41 1",
+) -> Path:
+    """Export an experimental Nav/Gazebo world where wheels contact the mesh.
+
+    Keep this separate from ``world.sdf``. Mesh contact is useful for terrain
+    A/B tests, but the accepted Nav2 smoke baseline uses the thick flat floor
+    world for repeatable skid-steer contact.
+    """
+
+    world_path = out_dir / "world_mesh_contact.sdf"
+    terrain_uri = terrain_sdf.resolve().as_uri()
+    models = []
+    for i, rect in enumerate(wall_rects):
+        cx = float(rect["center"][0])
+        cy = float(rect["center"][1])
+        sx = float(rect["size"][0])
+        sy = float(rect["size"][1])
+        models.append(
+            _box_model(
+                f"nav_wall_{i:03d}",
+                f"{cx:.3f} {cy:.3f} {wall_height / 2.0:.3f} 0 0 0",
+                f"{sx:.3f} {sy:.3f} {wall_height:.3f}",
+                wall_color,
+            )
+        )
+
+    world_path.write_text(
+        f"""<?xml version="1.0"?>
+<sdf version="1.6">
+  <world name="generated_nav_maze_mesh_contact">
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-forcetorque-system" name="ignition::gazebo::systems::ForceTorque"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.82 0.82 0.78 1</diffuse>
+      <specular>0.18 0.18 0.16 1</specular>
+      <direction>-0.45 0.20 -0.88</direction>
+    </light>
+
+    <include><uri>{terrain_uri}</uri></include>
 {''.join(models)}
   </world>
 </sdf>

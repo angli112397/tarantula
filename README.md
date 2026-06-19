@@ -5,11 +5,10 @@
 ```text
 shared heightmap terrain
   -> tarantula_v3 active-suspension chassis
-  -> ROS2/Nav2-standard planar motion and SLAM/Nav integration
-  -> wheel encoder + IMU odometry through robot_localization
-  -> classical /cmd_vel -> six-wheel skid-steer controller
+  -> ROS2/Nav2-standard planar motion and static-map navigation
+  -> official diff_drive_controller for Nav2 smoke tests
   -> optional 6D RL active-suspension posture policy
-  -> Gazebo posture/stability acceptance
+  -> Gazebo/Nav2 and posture/stability acceptance
   -> Isaac Lab posture-control curriculum
 ```
 
@@ -54,10 +53,14 @@ Output:
 
 ```text
 generated/terrains/nav_maze/42/
-  height.npy       # flat height layer, same grid convention as RL terrain
+  height.npy       # rl_curriculum-derived rough height layer with clear pads
   occupancy.npy    # navigation obstacle layer, same size/resolution
   map.pgm/yaml     # Nav2 occupancy map
-  world.sdf        # Gazebo world with walls generated from occupancy rectangles
+  traversability_cost.npy
+  terrain_cost_map.pgm/yaml   # Nav2 2.5D planning cost map
+  terrain_speed_mask.pgm/yaml # Nav2 SpeedFilter mask for slow terrain
+  world.sdf        # Gazebo Nav2 world: flat contact floor + terrain visual + walls
+  world_mesh_contact.sdf # experimental world: wheels contact the terrain mesh
   metadata.json    # spawn/goals/grid/layer metadata
 ```
 
@@ -69,9 +72,22 @@ and a forced center safety pad carved out of the generated segmented-wall
 layout. The goal is to keep the map visually useful for SLAM/Nav2 demos while
 avoiding spawn-side clearance failures.
 
-`map.pgm` preserves Gazebo/world x columns and flips only image rows when
-exporting, matching ROS `map_server`'s top-row image convention while keeping
-world `x/y` coordinates aligned with the SDF wall boxes.
+`height.npy` is generated from the same `rl_curriculum` heightmap source used by
+Isaac Lab, then the spawn/goal pads are flattened. This is the shared baseline
+for later “one grayscale height layer + one occupancy layer” experiments.
+Gazebo Nav2 smoke tests use `world.sdf`, which keeps a thick flat contact floor
+for stable skid-steer wheel contact and overlays the terrain mesh as visual
+context. Use `world_mesh_contact.sdf` only for explicit mesh-contact A/B tests.
+
+Static-map Nav2 uses three maps at once: `map.yaml` is the pure occupancy map
+for AMCL localization on `/map`; `terrain_cost_map.yaml` is published on
+`/terrain_cost_map` for global/local costmaps; `terrain_speed_mask.yaml` is
+published on `/terrain_speed_mask` for Nav2's official SpeedFilter. The terrain
+layers are derived from the shared height layer using slope and local relief,
+but `/map` stays a normal localization map. All maps preserve Gazebo/world x
+columns and flip only image rows when exporting, matching ROS `map_server`'s
+top-row image convention while keeping world `x/y` coordinates aligned with the
+SDF wall boxes.
 
 ## Build
 
@@ -82,7 +98,7 @@ colcon build --symlink-install --parallel-workers 1 --executor sequential
 source install/setup.bash
 ```
 
-## Gazebo Baseline
+## Gazebo/Nav2 Baseline
 
 Current model baseline:
 
@@ -100,15 +116,17 @@ Current model baseline:
 
 Nav2 demo baseline:
 
-- online SLAM: `slam_toolbox` consumes `/scan_gated`
-- static map navigation: `nav_static.launch.py` consumes the generated `map.yaml`
-  with `map_server + amcl + Nav2`
+- static map navigation: `nav_static.launch.py` launches two map servers:
+  `map.yaml` on `/map` for AMCL, `terrain_cost_map.yaml` on
+  `/terrain_cost_map` for Nav2 global/local costmaps, and
+  `terrain_speed_mask.yaml` on `/terrain_speed_mask` for SpeedFilter
 - odom: official diff-drive odom is the current Nav2 smoke-test source; EKF
   remains available for the custom per-wheel controller path
 - costmap footprint: v3-derived navigation footprint (`1.12m x 0.74m`), no extra footprint padding
 - conservative large-chassis costmap: local inflation `0.55m`, global inflation
   `0.65m`, slow cost decay, and higher Smac cost travel multiplier
-- exploration: `scripts/nav2_frontier_explore.py` uses high-clearance frontier observation points with Nav2 path precheck
+- online SLAM remains available through `nav.launch.py`, but automatic
+  exploration is not part of the current baseline.
 
 Current Nav2 status:
 
@@ -116,9 +134,7 @@ Current Nav2 status:
   execution are connected;
 - Gazebo static-map navigation works on the generated baseline maze with the
   official `diff_drive_controller`;
-- online SLAM with `slam_toolbox` publishes `/map` from `/scan_gated`;
-- frontier exploration via `scripts/nav2_frontier_explore.py` has completed
-  repeated automatic Nav2 goals in the baseline maze.
+- online SLAM with `slam_toolbox` publishes `/map` from `/scan_gated`.
 
 Launch static-map navigation on the generated maze:
 
@@ -133,7 +149,9 @@ ros2 launch tarantula_bringup sim.launch.py \
   spawn_x:=0.0 spawn_y:=0.0 spawn_z:=0.62 spawn_yaw:=0.0
 
 ros2 launch tarantula_bringup nav_static.launch.py \
-  map:=$(pwd)/generated/terrains/nav_maze/42/map.yaml \
+  localization_map:=$(pwd)/generated/terrains/nav_maze/42/map.yaml \
+  terrain_cost_map:=$(pwd)/generated/terrains/nav_maze/42/terrain_cost_map.yaml \
+  speed_mask:=$(pwd)/generated/terrains/nav_maze/42/terrain_speed_mask.yaml \
   cmd_vel_topic:=/diff_drive_controller/cmd_vel_unstamped \
   odom_topic:=/diff_drive_controller/odom
 ```
@@ -148,7 +166,7 @@ ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
   "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}"
 ```
 
-Launch online SLAM + Nav2 frontier mapping:
+Launch online SLAM + Nav2 manually:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -156,8 +174,6 @@ source install/setup.bash
 ros2 launch tarantula_bringup nav.launch.py \
   cmd_vel_topic:=/diff_drive_controller/cmd_vel_unstamped \
   odom_topic:=/diff_drive_controller/odom
-
-scripts/nav2_frontier_explore.py --max-goals 1
 ```
 
 Launch classical motion only:
@@ -199,14 +215,6 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
   "{linear: {x: 0.10}, angular: {z: 0.0}}"
 ```
 
-Direct chassis acceptance while Gazebo is running:
-
-```bash
-scripts/gazebo_chassis_pose_diffdrive_test.py --profile turn-only
-scripts/gazebo_chassis_pose_diffdrive_test.py --profile posture-only
-scripts/gazebo_chassis_pose_diffdrive_test.py --profile full
-```
-
 Run posture acceptance while Gazebo is running:
 
 ```bash
@@ -229,7 +237,7 @@ observation: 50D
   susp_joint_vel(6)
   wheel_joint_vel(6)
   wheel_force_b(18)
-  shaped cmd_vx/cmd_wz(2)
+  limited cmd_vx/cmd_wz(2)
   previous hip action(6)
 
 action: 6D
@@ -262,6 +270,22 @@ Smoke test:
 
 ```bash
 scripts/run_rl_env_smoke_v5.sh
+```
+
+GUI smoke for Isaac/Gazebo alignment:
+
+```bash
+source /home/ang/isaac_venv/bin/activate
+PYTHONPATH=src:src/tarantula_control \
+python3 src/tarantula_isaac/gui_smoke.py \
+  --terrain-mode heightmap \
+  --terrain-dir generated/terrains/rl_curriculum/42 \
+  --terrain-level-min 0 \
+  --terrain-level-max 0 \
+  --settle-seconds 1.0 \
+  --drive-seconds 30.0 \
+  --cmd-vx 0.20 \
+  --cmd-wz 0.40
 ```
 
 ## Acceptance

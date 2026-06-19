@@ -1,9 +1,8 @@
 """Skid-steer motion baseline.
 
 Maps ``cmd_vel`` to per-wheel velocity targets via a calibrated skid-steer
-differential. The stop-turn-drive shaper is retained in ``CommandShaper`` for
-use by the active-suspension posture policy (observation building), but is no
-longer in the wheel-control path.
+differential. ``cmd_vx`` and ``cmd_wz`` are allowed to act at the same time;
+Nav2-style curved motion is part of the baseline contract.
 
 RL does not alter wheel commands. The learned posture policy is a separate
 active-suspension controller running in its own node.
@@ -12,7 +11,6 @@ active-suspension controller running in its own node.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from enum import Enum
 
 import numpy as np
 
@@ -39,21 +37,10 @@ POSTURE_OBSERVATION_LAYOUT = (
     ("susp_joint_vel", 6, "joint_states hip/arm velocities"),
     ("wheel_joint_vel", 6, "joint_states wheel velocities"),
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
-    ("cmd_vx", 1, "shaped execution forward velocity"),
-    ("cmd_wz", 1, "shaped execution yaw rate"),
+    ("cmd_vx", 1, "limited command forward velocity"),
+    ("cmd_wz", 1, "limited command yaw rate"),
     ("prev_action", 6, "previous hip target action"),
 )
-
-# Backwards-compatible constant name for callers that only need the current
-# deployable posture contract dimensions.
-STAGE_B_OBSERVATION_DIM = POSTURE_OBSERVATION_DIM
-STAGE_B_ACTION_DIM = POSTURE_ACTION_DIM
-
-
-class MotionMode(str, Enum):
-    STOP = "stop"
-    DRIVE = "drive"
-    TURN = "turn"
 
 
 @dataclass(frozen=True)
@@ -62,58 +49,17 @@ class MotionControlConfig:
     max_abs_cmd_wz: float = 0.4
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
     drive_scale: float = 1.1532
-    pure_turn_track_scale: float = 0.7287
+    yaw_track_scale: float = 0.7287
     yaw_rate_kp: float = 0.0
     yaw_rate_ki: float = 0.0
     yaw_integral_limit: float = 0.8
     max_wheel_accel: float = 12.0
-    # Used by CommandShaper (posture_policy_node) to determine suspension mode.
-    turn_enter_wz: float = 0.08
-    turn_exit_wz: float = 0.04
 
 
 @dataclass(frozen=True)
 class MotionCommand:
     vx: float
     wz: float
-
-
-class CommandShaper:
-    """Shape cmd_vel into stop/turn/drive execution primitives.
-
-    Used by the active-suspension posture policy to determine which suspension
-    posture mode to apply. No longer in the wheel-control path; wheels receive
-    unshaped skid-steer commands directly.
-    """
-
-    def __init__(self, config: MotionControlConfig | None = None):
-        self.config = config or MotionControlConfig()
-        self._mode = MotionMode.STOP
-
-    @property
-    def mode(self) -> MotionMode:
-        return self._mode
-
-    def update_config(self, **kwargs) -> None:
-        self.config = replace(self.config, **kwargs)
-
-    def shape(self, command: MotionCommand) -> MotionCommand:
-        abs_wz = abs(command.wz)
-        if self._mode == MotionMode.TURN:
-            if abs_wz <= self.config.turn_exit_wz:
-                self._mode = MotionMode.DRIVE if abs(command.vx) >= 1.0e-4 else MotionMode.STOP
-        elif abs_wz >= self.config.turn_enter_wz:
-            self._mode = MotionMode.TURN
-        elif abs(command.vx) >= 1.0e-4:
-            self._mode = MotionMode.DRIVE
-        else:
-            self._mode = MotionMode.STOP
-
-        if self._mode == MotionMode.TURN:
-            return MotionCommand(0.0, command.wz)
-        if self._mode == MotionMode.DRIVE:
-            return MotionCommand(command.vx, 0.0)
-        return MotionCommand(0.0, 0.0)
 
 
 class SkidSteerMotionController:
@@ -156,7 +102,7 @@ class SkidSteerMotionController:
     def scheduled_track_scale(self, command: MotionCommand) -> float:
         if abs(command.wz) < 1.0e-4:
             return 1.0
-        return self.config.pure_turn_track_scale
+        return self.config.yaw_track_scale
 
     def wheel_targets(
         self,
@@ -243,6 +189,3 @@ def build_posture_observation(
     if obs.shape[0] != POSTURE_OBSERVATION_DIM:
         raise ValueError(f"observation must be {POSTURE_OBSERVATION_DIM}D, got {obs.shape[0]}")
     return obs
-
-
-build_stage_b_observation = build_posture_observation

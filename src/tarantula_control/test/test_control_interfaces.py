@@ -10,14 +10,14 @@ from tarantula_control.control_interfaces import (
     skid_steer_wheel_speeds,
 )
 from tarantula_control.motion_control import (
-    STAGE_B_OBSERVATION_DIM,
-    STAGE_B_ACTION_DIM,
+    POSTURE_OBSERVATION_DIM,
+    POSTURE_ACTION_DIM,
     MotionControlConfig,
     SkidSteerMotionController,
-    build_stage_b_observation,
+    build_posture_observation,
 )
 from tarantula_control.suspension_core import LEGS
-from tarantula_control.suspension_core import blend_hip_targets, posture_profile, validate_hip_targets
+from tarantula_control.suspension_core import validate_hip_targets
 from tarantula_control.vehicle_geometry import VEHICLE_GEOMETRY
 
 
@@ -46,7 +46,7 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_yaw_feedback_increases_left_right_split_when_yaw_is_low(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
+            yaw_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=2.0,
             max_abs_wheel_omega=10.0,
         ))
@@ -58,7 +58,7 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_yaw_feedback_resets_when_no_yaw_command(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
+            yaw_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=0.0,
             yaw_rate_ki=1.0,
             max_abs_wheel_omega=10.0,
@@ -70,7 +70,7 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_motion_controller_slew_limits_final_wheel_targets(self):
         controller = SkidSteerMotionController(MotionControlConfig(
-            pure_turn_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
+            yaw_track_scale=TEST_HIGH_TURN_TRACK_SCALE,
             yaw_rate_kp=0.0,
             max_wheel_accel=10.0,
             max_abs_wheel_omega=10.0,
@@ -107,7 +107,7 @@ class ControlInterfacesTest(unittest.TestCase):
         """Verify that a blended vx+wz command (Nav2 curve) produces correct differential."""
         controller = SkidSteerMotionController(MotionControlConfig(
             drive_scale=1.0,
-            pure_turn_track_scale=1.0,
+            yaw_track_scale=1.0,
             max_abs_wheel_omega=10.0,
         ))
         command = controller.limit_command(0.2, 0.3)
@@ -122,7 +122,7 @@ class ControlInterfacesTest(unittest.TestCase):
         zeros = {leg: 0.0 for leg in LEGS}
         zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
         command = SkidSteerMotionController().limit_command(0.2, 0.1)
-        obs = build_stage_b_observation(
+        obs = build_posture_observation(
             projected_gravity_b=(0.0, 0.0, -1.0),
             root_ang_vel_b=(0.0, 0.0, 0.0),
             susp_joint_pos=zeros,
@@ -130,9 +130,9 @@ class ControlInterfacesTest(unittest.TestCase):
             wheel_joint_vel=zeros,
             wheel_force=zero_forces,
             command=command,
-            prev_action=np.zeros(STAGE_B_ACTION_DIM, dtype=np.float32),
+            prev_action=np.zeros(POSTURE_ACTION_DIM, dtype=np.float32),
         )
-        self.assertEqual(obs.shape, (STAGE_B_OBSERVATION_DIM,))
+        self.assertEqual(obs.shape, (POSTURE_OBSERVATION_DIM,))
 
     def test_posture_observation_rejects_old_three_dim_prev_action(self):
         zeros = {leg: 0.0 for leg in LEGS}
@@ -140,7 +140,7 @@ class ControlInterfacesTest(unittest.TestCase):
         command = SkidSteerMotionController().limit_command(0.2, 0.1)
 
         with self.assertRaises(ValueError):
-            build_stage_b_observation(
+            build_posture_observation(
                 projected_gravity_b=(0.0, 0.0, -1.0),
                 root_ang_vel_b=(0.0, 0.0, 0.0),
                 susp_joint_pos=zeros,
@@ -151,16 +151,7 @@ class ControlInterfacesTest(unittest.TestCase):
                 prev_action=np.zeros(3, dtype=np.float32),
             )
 
-    def test_posture_profiles_are_bounded_six_leg_targets(self):
-        for name in ("neutral", "front_down", "rear_down", "raise", "lower", "left_trim"):
-            target = posture_profile(name)
-            self.assertEqual(len(target), len(LEGS))
-            self.assertTrue(all(abs(value) <= 0.45 for value in target))
-
-    def test_posture_residual_blend_is_bounded(self):
-        base = posture_profile("neutral")
-        blended = blend_hip_targets(base, [1.0] * 6, residual_limit=0.1)
-        self.assertEqual(blended, tuple([0.1] * 6))
+    def test_validate_hip_targets_clamps_to_baseline_limit(self):
         clamped = validate_hip_targets([1.0] * 6)
         self.assertEqual(clamped, tuple([0.45] * 6))
 

@@ -12,8 +12,8 @@ signal used in the Gazebo deployment. Geometry contact booleans and simulator
 root linear velocity are intentionally not part of the actor observation.
 
 The raw command interface is cmd_vel-style: cmd_vx (m/s) and cmd_wz (rad/s).
-The policy observes and is rewarded against the shaped execution command,
-matching Gazebo's default stop-turn-drive baseline.
+The policy observes the limited execution command directly; ``cmd_vx`` and
+``cmd_wz`` can be active together for Nav2-style curved motion.
 
 Action space = 6D. Obs = 50D. See suspension_env_cfg.py for full layout.
 """
@@ -117,7 +117,6 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._cmd_wz = torch.zeros(self.num_envs, device=self.device)
         self._exec_cmd_vx = torch.zeros(self.num_envs, device=self.device)
         self._exec_cmd_wz = torch.zeros(self.num_envs, device=self.device)
-        self._turn_mode = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._command_time_left = torch.zeros(self.num_envs, device=self.device)
         self._command_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._mission_phase = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -168,14 +167,16 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         if len(push_envs) > 0:
             plo, phi = self.cfg.push_lin_vel_range
             n = len(push_envs)
-            vel_delta = torch.zeros(n, 6, device=self.device)
-            vel_delta[:, 0] = (torch.rand(n, device=self.device) * 2 - 1) * phi
-            vel_delta[:, 1] = (torch.rand(n, device=self.device) * 2 - 1) * phi * 0.6
-            current_vel = torch.cat([
-                self._robot.data.root_lin_vel_w[push_envs],
-                self._robot.data.root_ang_vel_w[push_envs],
-            ], dim=-1)
-            self._robot.write_root_velocity_to_sim(current_vel + vel_delta, push_envs)
+            max_push = max(abs(float(plo)), abs(float(phi)))
+            if max_push > 0.0:
+                vel_delta = torch.zeros(n, 6, device=self.device)
+                vel_delta[:, 0] = (torch.rand(n, device=self.device) * 2.0 - 1.0) * max_push
+                vel_delta[:, 1] = (torch.rand(n, device=self.device) * 2.0 - 1.0) * max_push * 0.6
+                current_vel = torch.cat([
+                    self._robot.data.root_lin_vel_w[push_envs],
+                    self._robot.data.root_ang_vel_w[push_envs],
+                ], dim=-1)
+                self._robot.write_root_velocity_to_sim(current_vel + vel_delta, push_envs)
             slo, shi = self.cfg.push_interval_steps
             self._push_countdown[push_envs] = torch.randint(slo, shi, (n,), device=self.device)
 
@@ -188,7 +189,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
         base_track_scale = torch.where(
             torch.abs(self._exec_cmd_wz) >= 1.0e-4,
-            torch.full_like(self._exec_cmd_wz, float(self.cfg.pure_turn_track_scale)),
+            torch.full_like(self._exec_cmd_wz, float(self.cfg.yaw_track_scale)),
             torch.ones_like(self._exec_cmd_wz),
         )
         turn_track = EFFECTIVE_TRACK * base_track_scale
@@ -258,20 +259,15 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 self._sample_commands(primitive_envs)
 
     def _update_execution_commands(self) -> None:
-        abs_wz = torch.abs(self._cmd_wz)
-        enter = abs_wz >= float(self.cfg.turn_enter_wz)
-        exit_turn = abs_wz <= float(self.cfg.turn_exit_wz)
-        self._turn_mode = torch.where(self._turn_mode, ~exit_turn, enter)
-        drive_active = (~self._turn_mode) & (torch.abs(self._cmd_vx) >= 1.0e-4)
-        self._exec_cmd_vx = torch.where(
-            drive_active,
+        self._exec_cmd_vx = torch.clamp(
             self._cmd_vx,
-            torch.zeros_like(self._cmd_vx),
+            float(self.cfg.command_vx_range[0]),
+            float(self.cfg.command_vx_range[1]),
         )
-        self._exec_cmd_wz = torch.where(
-            self._turn_mode,
+        self._exec_cmd_wz = torch.clamp(
             self._cmd_wz,
-            torch.zeros_like(self._cmd_wz),
+            float(self.cfg.command_wz_range[0]),
+            float(self.cfg.command_wz_range[1]),
         )
 
     def _termination_terms(self) -> dict[str, torch.Tensor]:
@@ -470,7 +466,6 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._last_wheel_target[env_ids] = 0.0
-        self._turn_mode[env_ids] = False
         self._exec_cmd_vx[env_ids] = 0.0
         self._exec_cmd_wz[env_ids] = 0.0
         self._command_mode[env_ids] = 0
@@ -504,13 +499,15 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             float(
                 self.cfg.command_stop_prob
                 + self.cfg.command_straight_prob
-                + self.cfg.command_pure_turn_prob
+                + self.cfg.command_turn_prob
+                + self.cfg.command_curve_prob
             ),
             1.0e-6,
         )
         stop_end = float(self.cfg.command_stop_prob) / total
         straight_end = stop_end + float(self.cfg.command_straight_prob) / total
-        pure_turn_end = straight_end + float(self.cfg.command_pure_turn_prob) / total
+        turn_end = straight_end + float(self.cfg.command_turn_prob) / total
+        curve_end = turn_end + float(self.cfg.command_curve_prob) / total
 
         self._cmd_vx[env_ids] = 0.0
         self._cmd_wz[env_ids] = 0.0
@@ -527,11 +524,20 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 len(straight_ids), self.cfg.command_min_abs_vx, vx_abs_hi
             )
 
-        turn_mask = (r >= straight_end) & (r < pure_turn_end)
+        turn_mask = (r >= straight_end) & (r < turn_end)
         turn_ids = env_ids[turn_mask]
         if len(turn_ids) > 0:
             self._cmd_wz[turn_ids] = self._sample_abs_with_sign(
                 len(turn_ids), self.cfg.command_min_abs_wz, wz_abs_hi
+            )
+        curve_mask = (r >= turn_end) & (r < curve_end)
+        curve_ids = env_ids[curve_mask]
+        if len(curve_ids) > 0:
+            self._cmd_vx[curve_ids] = self._sample_abs_with_sign(
+                len(curve_ids), self.cfg.command_min_abs_vx, vx_abs_hi
+            )
+            self._cmd_wz[curve_ids] = self._sample_abs_with_sign(
+                len(curve_ids), self.cfg.command_min_abs_wz, wz_abs_hi
             )
         self._update_execution_commands()
 

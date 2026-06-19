@@ -16,7 +16,6 @@ from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .motion_control import (
-    CommandShaper,
     MotionControlConfig,
     POSTURE_ACTION_DIM,
     POSTURE_OBSERVATION_DIM,
@@ -37,8 +36,6 @@ class PosturePolicyNode(Node):
         self.declare_parameter("cmd_wz", 0.0)
         self.declare_parameter("max_abs_cmd_vx", defaults.max_abs_cmd_vx)
         self.declare_parameter("max_abs_cmd_wz", defaults.max_abs_cmd_wz)
-        self.declare_parameter("turn_enter_wz", defaults.turn_enter_wz)
-        self.declare_parameter("turn_exit_wz", defaults.turn_exit_wz)
         self.declare_parameter("force_observation_enabled", True)
 
         self.policy = RLPosturePolicy(str(self.get_parameter("policy_weights_npz").value))
@@ -53,10 +50,7 @@ class PosturePolicyNode(Node):
         control_config = MotionControlConfig(
             max_abs_cmd_vx=float(self.get_parameter("max_abs_cmd_vx").value),
             max_abs_cmd_wz=float(self.get_parameter("max_abs_cmd_wz").value),
-            turn_enter_wz=float(self.get_parameter("turn_enter_wz").value),
-            turn_exit_wz=float(self.get_parameter("turn_exit_wz").value),
         )
-        self.command_shaper = CommandShaper(control_config)
         self.motion_controller = SkidSteerMotionController(control_config)
         initial_command = self.motion_controller.limit_command(
             float(self.get_parameter("cmd_vx").value),
@@ -129,7 +123,6 @@ class PosturePolicyNode(Node):
         if not self.joint_seen:
             return
         command = self.motion_controller.limit_command(self.cmd_vx, self.cmd_wz)
-        execution_command = self.command_shaper.shape(command)
         obs = build_posture_observation(
             projected_gravity_b=self.proj_grav,
             root_ang_vel_b=self.ang_vel,
@@ -137,7 +130,7 @@ class PosturePolicyNode(Node):
             susp_joint_vel=self.joint_vel,
             wheel_joint_vel=self.wheel_vel,
             wheel_force=self.wheel_force,
-            command=execution_command,
+            command=command,
             prev_action=self.prev_action,
         )
         action = self.policy.act(obs)
@@ -145,8 +138,8 @@ class PosturePolicyNode(Node):
         self._publish_hip_targets(action)
         self.status_pub.publish(Float64MultiArray(data=[
             float(np.max(np.abs(action))),
-            float(execution_command.vx),
-            float(execution_command.wz),
+            float(command.vx),
+            float(command.wz),
             float(self.ang_vel[0]),
             float(self.ang_vel[1]),
             float(self.ang_vel[2]),

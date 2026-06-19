@@ -52,10 +52,10 @@ New policy runtime:
 
 1. xacro generates URDF for `tarantula_v3.urdf.xacro`.
 2. Gazebo spawn is stable on flat terrain.
-3. Direct wheel/hip acceptance profiles still pass.
-4. Classical `/cmd_vel` straight and pure-turn behavior remains usable.
-5. SLAM/Nav smoke runs on the generated Nav2/Gazebo baseline maze.
-6. No-RL posture baseline is recorded.
+3. Official diff-drive `/cmd_vel` straight, curve, and yaw behavior remains usable.
+4. SLAM/Nav static-map smoke runs on the generated Nav2/Gazebo baseline maze.
+5. No-RL posture baseline is recorded.
+6. Isaac GUI smoke proves spawn, meter-scale motion, and curve response on the shared heightmap.
 7. RL active suspension improves roll/pitch or scan stability without visible hip jitter.
 
 ## Explicit Non-Goals

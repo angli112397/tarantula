@@ -19,17 +19,20 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
 TARANTULA_USD_DIR = "/tmp/tarantula_usd"
-TARANTULA_USD_NAME = "tarantula_v3_active_suspension_sphere_wheels.usd"
+WHEEL_COLLISION = os.environ.get("TARANTULA_ISAAC_WHEEL_COLLISION", "sphere").strip().lower()
+if WHEEL_COLLISION not in {"sphere", "cylinder"}:
+    raise ValueError("TARANTULA_ISAAC_WHEEL_COLLISION must be 'sphere' or 'cylinder'")
+TARANTULA_USD_NAME = f"tarantula_v3_active_suspension_{WHEEL_COLLISION}_wheels.usd"
 TARANTULA_USD_PATH = os.path.join(TARANTULA_USD_DIR, TARANTULA_USD_NAME)
 
-# Generated via: xacro tarantula_core_v3.urdf.xacro wheel_collision:=sphere lidar:=false > URDF_PATH
+# Generated via: xacro tarantula_core_v3.urdf.xacro wheel_collision:=$TARANTULA_ISAAC_WHEEL_COLLISION lidar:=false > URDF_PATH
 URDF_PATH = "/tmp/tarantula_v3.urdf"
 URDF_STAMP_PATH = f"{URDF_PATH}.sha256"
 USD_STAMP_PATH = os.path.join(TARANTULA_USD_DIR, f"{TARANTULA_USD_NAME}.sha256")
 
 # Velocity-drive P gain for wheel_*_joint (rad/s -> N*m). Wheel limit is
-# effort=38 N*m / velocity=30 rad/s. Stage B uses a ±6 rad/s final wheel target
-# envelope around the scheduled skid-steer baseline. This gain preserves enough
+# effort=38 N*m / velocity=30 rad/s. The posture task uses a ±6 rad/s final
+# wheel target envelope around the scheduled skid-steer baseline. This gain preserves enough
 # yaw authority for large differential wheel targets.
 WHEEL_DRIVE_GAIN = 12.7
 
@@ -91,7 +94,7 @@ def _xacro_env() -> dict[str, str]:
 def _ensure_core_urdf(urdf_path: str) -> None:
     """Generate the temporary Isaac URDF from xacro when sources changed."""
     source_paths = _xacro_sources()
-    source_hash = _fingerprint(source_paths, extra="v3;wheel_collision=sphere;lidar=false")
+    source_hash = _fingerprint(source_paths, extra=f"v3;wheel_collision={WHEEL_COLLISION};lidar=false")
     if os.path.exists(urdf_path) and _read_stamp(URDF_STAMP_PATH) == source_hash:
         return
 
@@ -100,13 +103,13 @@ def _ensure_core_urdf(urdf_path: str) -> None:
     if not os.path.exists(xacro_bin):
         raise FileNotFoundError(
             f"{urdf_path} not found and xacro is unavailable. Source ROS 2 Humble or install xacro, then run:\n"
-            f"  xacro {xacro_path} wheel_collision:=sphere lidar:=false > {urdf_path}"
+            f"  xacro {xacro_path} wheel_collision:={WHEEL_COLLISION} lidar:=false > {urdf_path}"
         )
     if not xacro_path.exists():
         raise FileNotFoundError(f"missing Tarantula xacro source: {xacro_path}")
 
     os.makedirs(os.path.dirname(urdf_path), exist_ok=True)
-    command = [xacro_bin, str(xacro_path), "wheel_collision:=sphere", "lidar:=false"]
+    command = [xacro_bin, str(xacro_path), f"wheel_collision:={WHEEL_COLLISION}", "lidar:=false"]
     result = subprocess.run(
         command,
         check=False,
@@ -232,7 +235,15 @@ def ensure_tarantula_usd(urdf_path: str = URDF_PATH) -> str:
 
 
 TARANTULA_CFG = ArticulationCfg(
-    spawn=sim_utils.UsdFileCfg(usd_path=TARANTULA_USD_PATH, activate_contact_sensors=True),
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=TARANTULA_USD_PATH,
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            max_depenetration_velocity=2.0,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=2,
+        ),
+    ),
     init_state=ArticulationCfg.InitialStateCfg(pos=(0.0, 0.0, SPAWN_Z_OFFSET)),
     # Single implicit-actuator group covering every joint: stiffness/damping
     # explicitly set to None (ActuatorBaseCfg has no default -- MISSING) so

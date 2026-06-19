@@ -76,18 +76,39 @@ class GenerateTerrainTest(unittest.TestCase):
 
             ET.parse(out_dir / "terrain.sdf")
             ET.parse(out_dir / "world.sdf")
+            ET.parse(out_dir / "world_mesh_contact.sdf")
 
             height = np.load(out_dir / "height.npy")
             occupancy = np.load(out_dir / "occupancy.npy")
             metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
             map_yaml = (out_dir / "map.yaml").read_text(encoding="ascii")
+            terrain_map_yaml = (out_dir / "terrain_cost_map.yaml").read_text(encoding="ascii")
+            speed_mask_yaml = (out_dir / "terrain_speed_mask.yaml").read_text(encoding="ascii")
+            terrain_cost = np.load(out_dir / "traversability_cost.npy")
+            speed_mask = np.load(out_dir / "terrain_speed_mask.npy")
 
             self.assertEqual(metadata["preset"], "nav_maze")
             self.assertEqual(height.shape, (161, 241))
             self.assertEqual(occupancy.shape, height.shape)
+            self.assertEqual(terrain_cost.shape, height.shape)
+            self.assertEqual(speed_mask.shape, height.shape)
+            self.assertEqual(metadata["height_source"]["preset"], "rl_curriculum")
+            self.assertGreater(float(height.max()), 0.05)
+            self.assertLess(float(height.min()), 0.0)
             self.assertTrue((out_dir / "map.pgm").is_file())
+            self.assertTrue((out_dir / "terrain_cost_map.pgm").is_file())
+            self.assertTrue((out_dir / "terrain_speed_mask.pgm").is_file())
+            self.assertTrue((out_dir / "world_mesh_contact.sdf").is_file())
             self.assertIn("resolution: 0.100000", map_yaml)
             self.assertIn("origin: [-12.000000, -8.000000, 0.0]", map_yaml)
+            self.assertIn("mode: scale", terrain_map_yaml)
+            self.assertIn("origin: [-12.000000, -8.000000, 0.0]", terrain_map_yaml)
+            self.assertIn("mode: scale", speed_mask_yaml)
+            self.assertEqual(metadata["layering"]["nav2_terrain_cost_map"], "terrain_cost_map.yaml")
+            self.assertEqual(metadata["layering"]["nav2_speed_filter_mask"], "terrain_speed_mask.yaml")
+            self.assertEqual(metadata["layering"]["traversability_cost_layer"], "traversability_cost.npy")
+            self.assertEqual(metadata["layering"]["speed_filter_mask_layer"], "terrain_speed_mask.npy")
+            self.assertGreater(metadata["traversability"]["medium_cost_cells"], 0)
             self.assertEqual(metadata["obstacle_count"], 3)
             self.assertEqual(metadata["door_width"], 5.2)
             self.assertEqual(metadata["min_corridor_width"], 4.8)
@@ -96,17 +117,38 @@ class GenerateTerrainTest(unittest.TestCase):
 
             world_sdf = (out_dir / "world.sdf").read_text(encoding="utf-8")
             self.assertIn('model name="flat_floor"', world_sdf)
+            self.assertIn('model name="terrain_visual_only"', world_sdf)
             self.assertNotIn("<include><uri>", world_sdf)
+            mesh_world_sdf = (out_dir / "world_mesh_contact.sdf").read_text(encoding="utf-8")
+            self.assertIn("terrain.sdf", mesh_world_sdf)
 
             cfg = NavMazeCfg()
             sx, sy, _ = metadata["spawn"]
             ix = int(round((sx + cfg.size_x / 2.0) / cfg.resolution))
             iy = int(round((sy + cfg.size_y / 2.0) / cfg.resolution))
             self.assertFalse(bool(occupancy[iy, ix]))
+            half = int(round(4.8 / 2.0 / cfg.resolution))
+            self.assertTrue(np.allclose(height[iy - half : iy + half + 1, ix - half : ix + half + 1], 0.0))
+            self.assertTrue(np.all(terrain_cost[iy - half : iy + half + 1, ix - half : ix + half + 1] == 0))
+            self.assertTrue(np.all(speed_mask[iy - half : iy + half + 1, ix - half : ix + half + 1] == 0))
+            self.assertTrue(np.all(terrain_cost[occupancy] == 100))
+            self.assertTrue(np.all(speed_mask[occupancy] == 0))
+            self.assertGreater(int(speed_mask.max()), 0)
+            self.assertLessEqual(int(speed_mask.max()), 65)
 
             pgm = _read_pgm_payload(out_dir / "map.pgm")
             expected_pgm = np.where(occupancy[::-1, :], 0, 254).astype(np.uint8)
             self.assertTrue(np.array_equal(pgm, expected_pgm))
+            terrain_pgm = _read_pgm_payload(out_dir / "terrain_cost_map.pgm")
+            expected_terrain_pgm = np.rint(
+                254.0 - np.clip(terrain_cost[::-1, :].astype(np.float32), 0.0, 100.0) / 100.0 * 254.0
+            ).astype(np.uint8)
+            self.assertTrue(np.array_equal(terrain_pgm, expected_terrain_pgm))
+            speed_pgm = _read_pgm_payload(out_dir / "terrain_speed_mask.pgm")
+            expected_speed_pgm = np.rint(
+                254.0 - np.clip(speed_mask[::-1, :].astype(np.float32), 0.0, 100.0) / 100.0 * 254.0
+            ).astype(np.uint8)
+            self.assertTrue(np.array_equal(speed_pgm, expected_speed_pgm))
 
 
 if __name__ == "__main__":

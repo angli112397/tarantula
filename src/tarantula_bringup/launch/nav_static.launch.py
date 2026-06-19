@@ -20,14 +20,23 @@ def generate_launch_description():
     """
     bringup_dir = get_package_share_directory('tarantula_bringup')
     params_file = LaunchConfiguration('params_file')
-    map_file = LaunchConfiguration('map')
+    localization_map_file = LaunchConfiguration('localization_map')
+    terrain_cost_map_file = LaunchConfiguration('terrain_cost_map')
+    speed_mask_file = LaunchConfiguration('speed_mask')
     cmd_vel_remap = ('cmd_vel', LaunchConfiguration('cmd_vel_topic'))
     odom_override = {'odom_topic': LaunchConfiguration('odom_topic')}
 
     scan_gate = Node(
         package='tarantula_control',
         executable='scan_gate',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{
+            'use_sim_time': True,
+            # Static-map localization needs continuous scan updates. On the
+            # mesh-contact validation world, a 3 deg gate starves AMCL as soon
+            # as the robot climbs a small bump, freezing map->odom. Keep this
+            # permissive until active suspension reduces roll/pitch.
+            'tilt_gate': 0.14,
+        }],
         output='screen')
 
     map_server = Node(
@@ -36,7 +45,44 @@ def generate_launch_description():
         name='map_server',
         parameters=[{
             'use_sim_time': True,
-            'yaml_filename': map_file,
+            'yaml_filename': localization_map_file,
+            'topic_name': 'map',
+        }],
+        output='screen')
+
+    terrain_map_server = Node(
+        package='nav2_map_server',
+        executable='map_server',
+        name='terrain_map_server',
+        parameters=[{
+            'use_sim_time': True,
+            'yaml_filename': terrain_cost_map_file,
+            'topic_name': 'terrain_cost_map',
+        }],
+        output='screen')
+
+    speed_mask_server = Node(
+        package='nav2_map_server',
+        executable='map_server',
+        name='speed_mask_server',
+        parameters=[{
+            'use_sim_time': True,
+            'yaml_filename': speed_mask_file,
+            'topic_name': 'terrain_speed_mask',
+        }],
+        output='screen')
+
+    speed_filter_info_server = Node(
+        package='nav2_map_server',
+        executable='costmap_filter_info_server',
+        name='speed_costmap_filter_info_server',
+        parameters=[{
+            'use_sim_time': True,
+            'type': 1,
+            'filter_info_topic': '/speed_costmap_filter_info',
+            'mask_topic': '/terrain_speed_mask',
+            'base': 100.0,
+            'multiplier': -1.0,
         }],
         output='screen')
 
@@ -56,7 +102,7 @@ def generate_launch_description():
             'initial_pose.x': ParameterValue(LaunchConfiguration('initial_pose_x'), value_type=float),
             'initial_pose.y': ParameterValue(LaunchConfiguration('initial_pose_y'), value_type=float),
             'initial_pose.yaw': ParameterValue(LaunchConfiguration('initial_pose_a'), value_type=float),
-            'transform_tolerance': 0.5,
+            'transform_tolerance': 1.5,
             'update_min_d': 0.10,
             'update_min_a': 0.10,
             'min_particles': 500,
@@ -99,6 +145,9 @@ def generate_launch_description():
             'autostart': True,
             'node_names': [
                 'map_server',
+                'terrain_map_server',
+                'speed_mask_server',
+                'speed_costmap_filter_info_server',
                 'amcl',
                 'controller_server',
                 'planner_server',
@@ -113,9 +162,20 @@ def generate_launch_description():
             'params_file',
             default_value=os.path.join(bringup_dir, 'config', 'nav2.yaml')),
         DeclareLaunchArgument(
-            'map',
+            'localization_map',
             default_value=os.path.join(
-                os.getcwd(), 'generated', 'terrains', 'nav_maze', '42', 'map.yaml')),
+                os.getcwd(), 'generated', 'terrains', 'nav_maze', '42', 'map.yaml'),
+            description='Pure occupancy map for AMCL localization'),
+        DeclareLaunchArgument(
+            'terrain_cost_map',
+            default_value=os.path.join(
+                os.getcwd(), 'generated', 'terrains', 'nav_maze', '42', 'terrain_cost_map.yaml'),
+            description='Terrain-aware scaled cost map for Nav2 global/local costmaps'),
+        DeclareLaunchArgument(
+            'speed_mask',
+            default_value=os.path.join(
+                os.getcwd(), 'generated', 'terrains', 'nav_maze', '42', 'terrain_speed_mask.yaml'),
+            description='Terrain speed-filter mask for Nav2 SpeedFilter'),
         DeclareLaunchArgument(
             'cmd_vel_topic', default_value='/cmd_vel',
             description='Nav2 controller output topic; use /diff_drive_controller/cmd_vel_unstamped for official diff_drive_controller'),
@@ -133,6 +193,9 @@ def generate_launch_description():
             description='AMCL initial yaw (rad) — should match robot spawn heading'),
         scan_gate,
         map_server,
+        terrain_map_server,
+        speed_mask_server,
+        speed_filter_info_server,
         amcl,
         controller,
         planner,

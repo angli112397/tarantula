@@ -335,14 +335,14 @@ def build_report(args: argparse.Namespace) -> dict:
         "vehicle_geometry": asdict(VEHICLE_GEOMETRY),
         "current": {
             "drive_scale": float(args.current_drive_scale),
-            "pure_turn_track_scale": float(args.current_track_scale),
-            "motion_config_default_pure_turn_track_scale": float(defaults.pure_turn_track_scale),
+            "yaw_track_scale": float(args.current_track_scale),
+            "motion_config_default_yaw_track_scale": float(defaults.yaw_track_scale),
         },
         "recommended": {
             "drive_scale": float(args.current_drive_scale) * drive_ratio,
-            "pure_turn_track_scale": recommended_track_scale,
+            "yaw_track_scale": recommended_track_scale,
             "drive_scale_valid": drive_valid,
-            "pure_turn_track_scale_valid": yaw_valid,
+            "yaw_track_scale_valid": yaw_valid,
         },
         "acceptance": {
             "all_directions_ok": all(segment.direction_ok for segment in segments),
@@ -353,7 +353,7 @@ def build_report(args: argparse.Namespace) -> dict:
         "segments": [asdict(segment) for segment in segments],
         "notes": [
             "drive_scale is an effective forward gain recommendation; keep it as a baseline/randomization center unless a deployable parameter is added.",
-            "pure_turn_track_scale maps to MotionControlConfig.pure_turn_track_scale and the sim.launch.py pure_turn_track_scale argument.",
+            "yaw_track_scale maps to MotionControlConfig.yaw_track_scale and the sim.launch.py yaw_track_scale argument.",
             "The report uses Gazebo truth pose only as observer data. Do not feed truth pose into runtime control or RL observations.",
         ],
     }
@@ -372,7 +372,7 @@ def main() -> int:
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--current-drive-scale", type=float, default=1.0)
-    parser.add_argument("--current-track-scale", type=float, default=float(defaults.pure_turn_track_scale))
+    parser.add_argument("--current-track-scale", type=float, default=float(defaults.yaw_track_scale))
     parser.add_argument("--neutral-roll-limit", type=float, default=0.08)
     parser.add_argument("--neutral-pitch-limit", type=float, default=0.08)
     parser.add_argument("--neutral-hip-error-limit", type=float, default=0.08)
@@ -386,7 +386,7 @@ def main() -> int:
     print(
         "RECOMMENDED "
         f"drive_scale={recommended['drive_scale']:.4f} "
-        f"pure_turn_track_scale={recommended['pure_turn_track_scale']:.4f}"
+        f"yaw_track_scale={recommended['yaw_track_scale']:.4f}"
     )
     if args.out:
         out_path = Path(args.out)

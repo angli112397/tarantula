@@ -44,9 +44,10 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # action scaling: policy outputs ±1 -> bounded hip targets
     stand_susp_target = 0.0         # rad, fallback neutral suspension target
     drive_scale = MOTION_DEFAULTS.drive_scale
-    pure_turn_track_scale = MOTION_DEFAULTS.pure_turn_track_scale
-    turn_enter_wz = MOTION_DEFAULTS.turn_enter_wz
-    turn_exit_wz = MOTION_DEFAULTS.turn_exit_wz
+    # Isaac PhysX skid-steer curve response needs a larger effective yaw track
+    # than the Gazebo/Nav2 deployment controller. The external cmd_vel contract
+    # stays identical; this is backend calibration for wheel target generation.
+    yaw_track_scale = 1.6
     max_abs_wheel_omega = MOTION_DEFAULTS.max_abs_wheel_omega
     hip_action_target_limit = 0.25   # rad, conservative active-suspension clamp
     reward_hip_action_rate_weight = 0.02
@@ -57,7 +58,8 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     command_wz_range = (-MOTION_DEFAULTS.max_abs_cmd_wz, MOTION_DEFAULTS.max_abs_cmd_wz)
     command_stop_prob = 0.20
     command_straight_prob = 0.40
-    command_pure_turn_prob = 0.40
+    command_turn_prob = 0.25
+    command_curve_prob = 0.25
     command_mission_prob = 0.40
     command_min_abs_vx = 0.12
     command_min_abs_wz = 0.15
@@ -69,13 +71,15 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     gravity = 9.81
     nominal_wheel_load = 23.1 * gravity / 6.0  # body(18) + 6*(arm 0.8 + wheel 1.5)
 
-    # domain randomization
+    # Domain randomization is opt-in by curriculum/profile. The baseline task
+    # must first prove stable posture control on deterministic terrain; random
+    # pushes are too easy to confuse with contact explosions during GUI smoke.
     friction_range = (0.3, 1.5)
     friction_num_buckets = 64
     body_mass_delta_range = (-3.0, 3.0)  # kg additive to base_link
     obs_noise_std = 0.02
-    push_interval_steps = (150, 300)
-    push_lin_vel_range = (-0.5, 0.5)  # m/s x/y delta
+    push_interval_steps = (10_000_000, 10_000_001)
+    push_lin_vel_range = (0.0, 0.0)  # m/s x/y velocity delta
 
     # Reward baseline: active-suspension stability. Motion tracking belongs to
     # ROS2/Nav2 and the classical wheel controller, not to RL.
