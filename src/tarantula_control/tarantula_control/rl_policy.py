@@ -2,7 +2,7 @@
 
 The deployable actor is fixed at 50D observation / 6D action:
 
-- obs[0:44]: IMU, hip state, wheel velocity, wheel F/T, and shaped command
+- obs[0:44]: IMU, hip state, wheel velocity, wheel F/T, and limited cmd_vx/cmd_wz
 - obs[44:50]: previous six hip actions
 - action[0:6]: direct bounded hip position targets in LEGS order
 """
@@ -36,8 +36,11 @@ class RLPosturePolicy:
         self.obs_std = npz["obs_normalizer._std"].reshape(-1)
         self.obs_dim = int(self.layers[0][0].shape[1])
         self.action_dim = int(self.layers[-1][0].shape[0])
+        # Fallback only fires if a checkpoint was exported without embedding
+        # this value -- 0.25 matches TarantulaSuspensionEnvCfg's current
+        # training default, not an arbitrary guess.
         self.hip_action_target_limit = (
-            float(npz["hip_action_target_limit"][0]) if "hip_action_target_limit" in npz else 0.30
+            float(npz["hip_action_target_limit"][0]) if "hip_action_target_limit" in npz else 0.25
         )
         if self.obs_mean.shape[0] != self.obs_dim:
             raise ValueError(f"obs normalizer has {self.obs_mean.shape[0]} dims, actor expects {self.obs_dim}")

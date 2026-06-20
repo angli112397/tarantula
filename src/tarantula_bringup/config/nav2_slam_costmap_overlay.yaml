@@ -1,0 +1,33 @@
+# Overlay loaded *after* nav2.yaml by nav.launch.py (online SLAM mode only).
+#
+# nav2.yaml's costmaps default to the static-map baseline: a static layer
+# fed by the offline-precomputed terrain_cost_map (derived from a known
+# heightmap). Online SLAM never has that — the map is being built live, so
+# there is no heightmap to precompute traversability cost from. This overlay
+# repoints the same "terrain_static_layer" plugin at slam_toolbox's actual
+# /map topic, restores the standard trinary occupancy interpretation, and
+# drops the terrain speed filter entirely (its info/mask topics are never
+# published in SLAM mode, so leaving it enabled would just be a dead plugin).
+#
+# ROS2 merges multiple parameter files passed to one node; keys here override
+# the matching keys loaded from nav2.yaml, everything else (DWB tuning,
+# inflation, footprint, behavior_server, ...) is inherited unchanged.
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      terrain_static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /map
+        map_subscribe_transient_local: true
+        trinary_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      filters: []
+      terrain_static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /map
+        map_subscribe_transient_local: true
+        trinary_costmap: true

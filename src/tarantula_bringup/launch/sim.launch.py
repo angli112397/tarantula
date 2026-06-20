@@ -129,6 +129,17 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('bridge_force_torque')),
         output='screen')
 
+    # Ground-truth odometry: eval harnesses only (see tarantula_v3.urdf.xacro's
+    # OdometryPublisher plugin docstring) -- never bridged into Nav2/control.
+    ground_truth_odom_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/ground_truth_odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+        ],
+        condition=IfCondition(LaunchConfiguration('bridge_ground_truth_odom')),
+        output='screen')
+
     # gz-sim 的 LaserScan.header.frame_id 是 sensor 的 scoped 名（tarantula/base_link/
     # lidar_sensor），与 URDF 的 lidar_link 是同一物理位姿（sensor 在 lidar_link 内无
     # 额外 <pose>）；发一条静态 identity TF 把它接到 lidar_link，否则 slam_toolbox/
@@ -273,6 +284,8 @@ def generate_launch_description():
                               description='true 时桥接 12 路 Gazebo force/torque topic；当前 RL/Gazebo 验收默认开启'),
         DeclareLaunchArgument('bridge_lidar', default_value='false',
                               description='true 时桥接 /scan 并发布 lidar frame 静态 TF；SLAM/Nav 演示时开启'),
+        DeclareLaunchArgument('bridge_ground_truth_odom', default_value='false',
+                              description='true 时桥接 /ground_truth_odom（仿真真值位姿/速度）；仅供 eval 脚本读取，绝不接入 Nav2/control'),
         DeclareLaunchArgument('odom_effective_track_scale', default_value=str(motion_defaults.yaw_track_scale),
                               description='wheel odom skid-steer effective track scale used before robot_localization fusion'),
         DeclareLaunchArgument('world', default_value=default_generated_world,
@@ -282,6 +295,7 @@ def generate_launch_description():
         core_bridge,
         lidar_bridge,
         force_torque_bridge,
+        ground_truth_odom_bridge,
         robot_state_publisher,
         lidar_frame_bridge,
         spawn_robot,

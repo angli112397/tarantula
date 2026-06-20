@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
+from tarantula_terrain.exporters import GENERATOR_SCHEMA_VERSION
 from tarantula_terrain.generate import generate
 from tarantula_terrain.nav_maze import NavMazeCfg, generate as generate_nav_maze
 
@@ -48,11 +49,15 @@ class GenerateTerrainTest(unittest.TestCase):
             metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
             world = (out_dir / "world.sdf").read_text(encoding="utf-8")
             self.assertEqual(metadata["preset"], "gazebo_demo")
+            self.assertEqual(metadata["generator_schema_version"], GENERATOR_SCHEMA_VERSION)
             self.assertEqual(height.shape, (151, 226))
             self.assertGreater(float(height.max()), 0.10)
             self.assertLess(float(height.min()), 0.0)
             self.assertNotIn("central_barrier", world)
             self.assertNotIn("landmark_blue", world)
+            # Walled preset: already contains the robot, so no need to tile.
+            self.assertEqual(metadata["surround_copies"], 0)
+            self.assertEqual(world.count("<include>"), 1)
 
     def test_rl_curriculum_exports_tile_origins(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,11 +69,19 @@ class GenerateTerrainTest(unittest.TestCase):
             height = np.load(out_dir / "height.npy")
             metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["preset"], "rl_curriculum")
+            self.assertEqual(metadata["generator_schema_version"], GENERATOR_SCHEMA_VERSION)
             self.assertEqual(height.shape, (161, 241))
             self.assertEqual(metadata["num_rows"], 4)
             self.assertEqual(metadata["num_cols"], 6)
             self.assertEqual(len(metadata["env_origins"]), 24)
             self.assertEqual(len(metadata["labels"]), 24)
+
+            # Unwalled preset: world.sdf tiles 8 extra copies of the same
+            # heightmap around the center so straying past size_x/size_y
+            # lands on more terrain instead of a void (see export_world_sdf).
+            self.assertEqual(metadata["surround_copies"], 1)
+            world = (out_dir / "world.sdf").read_text(encoding="utf-8")
+            self.assertEqual(world.count("<include>"), 9)
 
     def test_nav_maze_aligns_with_rl_curriculum_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +101,7 @@ class GenerateTerrainTest(unittest.TestCase):
             speed_mask = np.load(out_dir / "terrain_speed_mask.npy")
 
             self.assertEqual(metadata["preset"], "nav_maze")
+            self.assertEqual(metadata["generator_schema_version"], GENERATOR_SCHEMA_VERSION)
             self.assertEqual(height.shape, (161, 241))
             self.assertEqual(occupancy.shape, height.shape)
             self.assertEqual(terrain_cost.shape, height.shape)

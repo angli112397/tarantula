@@ -1,4 +1,10 @@
-# Nav2 配置（Humble）—— 静态地图和在线 SLAM 共用。
+# Nav2 配置（Humble）—— 静态地图（nav_static.launch.py）和在线 SLAM
+# （nav.launch.py）共用大部分参数（DWB/SMAC/behavior_server 调优、footprint）。
+# 两者唯一的真实差异是 costmap 静态层的数据源：static 模式有离线预算好的
+# terrain_cost_map（来自已知 heightmap），SLAM 模式探索阶段不可能有这种
+# 先验数据，只能用 slam_toolbox 实时发布的 /map。这部分差异由
+# nav2_slam_costmap_overlay.yaml 在 nav.launch.py 里叠加覆盖，不要在这里
+# 为 SLAM 模式特殊处理。
 # 默认 topic 保持 /cmd_vel + /odometry/filtered，launch 文件可覆盖到官方
 # diff_drive_controller 的 /diff_drive_controller/cmd_vel_unstamped 和
 # /diff_drive_controller/odom。map->odom 由 AMCL 或 slam_toolbox 提供。
@@ -23,7 +29,9 @@ controller_server:
     progress_checker_plugin: "progress_checker"
     goal_checker_plugins: ["general_goal_checker"]
     controller_plugins: ["FollowPath"]
-    speed_limit_topic: "speed_limit"
+    # Absolute topic name: must match terrain_speed_filter.speed_limit_topic
+    # below exactly, since no node in this stack is namespaced.
+    speed_limit_topic: "/speed_limit"
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"

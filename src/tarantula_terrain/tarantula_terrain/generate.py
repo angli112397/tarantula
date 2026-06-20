@@ -13,6 +13,12 @@ def generate(preset: str, seed: int, output_root: Path) -> Path:
     cfg = PRESETS[preset]
     out_dir = output_root / preset / str(seed)
     height, metadata = generate_heightmap(cfg, seed)
+    # Unwalled presets (rl_curriculum) have no physical barrier at size_x/size_y,
+    # so world.sdf tiles the same heightmap around the center tile to avoid a
+    # void at that boundary -- see export_world_sdf's docstring. Walled presets
+    # (gazebo_demo) already contain the robot, so leave them untiled.
+    surround_copies = 1 if cfg.wall_height <= 0.0 and cfg.wall_thickness <= 0.0 else 0
+    metadata["surround_copies"] = surround_copies
     export_height_assets(out_dir, height, metadata)
     obj_path = export_obj(out_dir, height, cfg.resolution)
     terrain_sdf = export_terrain_sdf(out_dir, obj_path)
@@ -23,6 +29,7 @@ def generate(preset: str, seed: int, output_root: Path) -> Path:
         cfg.size_y,
         cfg.wall_height,
         cfg.wall_thickness,
+        surround_copies=surround_copies,
     )
     return out_dir
 

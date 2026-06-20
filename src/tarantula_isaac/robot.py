@@ -44,7 +44,6 @@ def _repo_root() -> Path:
 def _xacro_sources() -> list[Path]:
     urdf_dir = _repo_root() / "src" / "tarantula_description" / "urdf"
     return [
-        urdf_dir / "tarantula_core_v2.urdf.xacro",
         urdf_dir / "tarantula_core_v3.urdf.xacro",
         urdf_dir / "tarantula_chassis_v2.xacro",
         urdf_dir / "tarantula_common.xacro",

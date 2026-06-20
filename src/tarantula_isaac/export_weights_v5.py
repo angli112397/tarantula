@@ -140,7 +140,7 @@ hip_action_target_limit = (
     else _read_env_yaml_float(ckpt_path, "hip_action_target_limit")
 )
 if hip_action_target_limit is None:
-    hip_action_target_limit = 0.30
+    hip_action_target_limit = 0.25  # TarantulaSuspensionEnvCfg's current training default
 npz_data["hip_action_target_limit"] = np.asarray([hip_action_target_limit], dtype=np.float32)
 
 # Validate shapes

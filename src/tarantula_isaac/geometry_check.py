@@ -47,12 +47,12 @@ def main() -> None:
 
     env_cfg = TarantulaSuspensionEnvCfg()
     env_cfg.scene.num_envs = 2
-    env_cfg.command_resampling_enabled = False
+    env_cfg.commands.resampling_enabled = False
     env = gym.make("Isaac-Tarantula-Suspension-v0", cfg=env_cfg)
     env.reset()
 
     base_env = env.unwrapped
-    zero_action = torch.zeros(base_env.num_envs, 3, device=base_env.device)
+    zero_action = torch.zeros(base_env.num_envs, env_cfg.action_space, device=base_env.device)
     steps_per_sec = round(1.0 / (env_cfg.sim.dt * env_cfg.decimation))
 
     # --- Check 1: settle on flat ground with no drive command ---

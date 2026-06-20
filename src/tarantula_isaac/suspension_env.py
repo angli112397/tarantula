@@ -34,7 +34,7 @@ from tarantula_control.control_interfaces import (
     WHEEL_RADIUS,
 )
 from tarantula_control.command_profiles import profile_sequence
-from tarantula_control.suspension_core import LEGS
+from tarantula_control.suspension_core import HIP_TARGET_LIMIT, LEGS
 
 from .suspension_env_cfg import TarantulaSuspensionEnvCfg
 
@@ -49,6 +49,7 @@ REWARD_KEYS = (
     "action_rate",
     "hip_action_rate",
     "joint_limit",
+    "slip",
     "alive",
     "termination",
     "total",
@@ -78,6 +79,12 @@ def _quat_roll_pitch(quat_w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return roll, pitch
 
 
+def _quat_yaw(quat_w: torch.Tensor) -> torch.Tensor:
+    """Batched yaw from wxyz quaternions (N, 4)."""
+    w, x, y, z = quat_w.unbind(-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
 class TarantulaSuspensionEnv(DirectRLEnv):
     cfg: TarantulaSuspensionEnvCfg
 
@@ -85,10 +92,10 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Friction domain randomization (PhysX tensor API).
-        lo, hi = self.cfg.friction_range
+        lo, hi = self.cfg.domain_rand.friction_range
         ranges = torch.tensor([[lo, hi], [lo, hi]], device="cpu")
         self._friction_buckets = sample_uniform(
-            ranges[:, 0], ranges[:, 1], (self.cfg.friction_num_buckets, 2), device="cpu"
+            ranges[:, 0], ranges[:, 1], (self.cfg.domain_rand.friction_num_buckets, 2), device="cpu"
         )
         self._friction_buckets[:, 1] = torch.min(self._friction_buckets[:, 0], self._friction_buckets[:, 1])
         self._num_shapes = self._robot.root_physx_view.max_shapes
@@ -99,7 +106,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._base_body_idx = list(self._robot.body_names).index("base_link")
 
         # Push perturbation countdown
-        lo, hi = self.cfg.push_interval_steps
+        lo, hi = self.cfg.domain_rand.push_interval_steps
         self._push_countdown = torch.randint(lo, hi, (self.num_envs,), device=self.device)
 
         # Joint ID lookup (LEGS order = fl/fr/ml/mr/rl/rr)
@@ -109,6 +116,15 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._wheel_joint_ids, _ = self._robot.find_joints(
             [f"wheel_{leg}_joint" for leg in LEGS], preserve_order=True
         )
+        # Per-wheel constants used every _apply_action call -- precomputed
+        # once instead of re-allocating a device tensor every env step.
+        self._wheel_direction = torch.tensor([WHEEL_DIRECTION[leg] for leg in LEGS], device=self.device)
+        self._yaw_correction_side_sign = torch.tensor([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0], device=self.device)
+
+        # Hip actuator gain domain randomization (sim-to-sim coverage for the
+        # USD-baked stiffness=130/damping=11 — see DomainRandCfg docstring).
+        self._default_hip_stiffness = self._robot.data.default_joint_stiffness[:, self._susp_joint_ids].clone()
+        self._default_hip_damping = self._robot.data.default_joint_damping[:, self._susp_joint_ids].clone()
 
         # Active-suspension policy: 6D hip target action.
         self._actions = torch.zeros(self.num_envs, int(self.cfg.action_space), device=self.device)
@@ -119,6 +135,11 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._exec_cmd_wz = torch.zeros(self.num_envs, device=self.device)
         self._command_time_left = torch.zeros(self.num_envs, device=self.device)
         self._command_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # command_mode: 0 primitive, 1 mission, 2 pure-pursuit checkpoint chase.
+        self._distance_traveled = torch.zeros(self.num_envs, device=self.device)
+        self._pursuit_waypoint = torch.zeros(self.num_envs, 2, device=self.device)
+        self._pursuit_checkpoints_left = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._yaw_error_integral = torch.zeros(self.num_envs, device=self.device)
         self._mission_phase = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._mission_turn_sign = torch.ones(self.num_envs, device=self.device)
         self._mission_drive_sign = torch.ones(self.num_envs, device=self.device)
@@ -165,7 +186,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._push_countdown -= 1
         push_envs = (self._push_countdown <= 0).nonzero(as_tuple=False).flatten()
         if len(push_envs) > 0:
-            plo, phi = self.cfg.push_lin_vel_range
+            plo, phi = self.cfg.domain_rand.push_lin_vel_range
             n = len(push_envs)
             max_push = max(abs(float(plo)), abs(float(phi)))
             if max_push > 0.0:
@@ -177,7 +198,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                     self._robot.data.root_ang_vel_w[push_envs],
                 ], dim=-1)
                 self._robot.write_root_velocity_to_sim(current_vel + vel_delta, push_envs)
-            slo, shi = self.cfg.push_interval_steps
+            slo, shi = self.cfg.domain_rand.push_interval_steps
             self._push_countdown[push_envs] = torch.randint(slo, shi, (n,), device=self.device)
 
     def _apply_action(self) -> None:
@@ -185,10 +206,17 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             raise RuntimeError("active-suspension policy requires a 6D action space")
         susp = self._actions * float(self.cfg.hip_action_target_limit)
         self._last_hip_target = susp.detach()
-        self._robot.set_joint_position_target(susp.clamp(-0.6, 0.6), joint_ids=self._susp_joint_ids)
+        # Safety clamp at the real URDF hip joint limit (HIP_TARGET_LIMIT), not
+        # an arbitrary bound -- hip_action_target_limit (0.25) is already well
+        # inside this, so the clamp only matters if a CLI override ever raises
+        # it past the joint's physical range.
+        self._robot.set_joint_position_target(
+            susp.clamp(-HIP_TARGET_LIMIT, HIP_TARGET_LIMIT), joint_ids=self._susp_joint_ids
+        )
 
+        turning_mask = torch.abs(self._exec_cmd_wz) >= 1.0e-4
         base_track_scale = torch.where(
-            torch.abs(self._exec_cmd_wz) >= 1.0e-4,
+            turning_mask,
             torch.full_like(self._exec_cmd_wz, float(self.cfg.yaw_track_scale)),
             torch.ones_like(self._exec_cmd_wz),
         )
@@ -197,10 +225,37 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         left = (drive_vx - 0.5 * turn_track * self._exec_cmd_wz) / WHEEL_RADIUS
         right = (drive_vx + 0.5 * turn_track * self._exec_cmd_wz) / WHEEL_RADIUS
         base_wheel = torch.stack((left, right, left, right, left, right), dim=-1)
-        direction = torch.tensor([WHEEL_DIRECTION[leg] for leg in LEGS], device=self.device)
-        wheel = base_wheel * direction
         wheel = torch.clamp(
-            wheel,
+            base_wheel * self._wheel_direction,
+            -float(self.cfg.max_abs_wheel_omega),
+            float(self.cfg.max_abs_wheel_omega),
+        )
+
+        # Closed-loop yaw-rate correction -- mirrors motion_control.py's
+        # SkidSteerMotionController.wheel_targets() exactly (clamp open-loop
+        # target, add a signed correction from measured yaw-rate error, clamp
+        # again; right wheels +correction, left wheels -correction, matching
+        # LEGS order fl/fr/ml/mr/rl/rr) so training experiences the same
+        # control law Gazebo deployment uses, not an open-loop approximation
+        # of it. See cfg.yaw_rate_kp's docstring for why this exists at all.
+        measured_wz = self._robot.data.root_ang_vel_b[:, 2]
+        yaw_error = self._exec_cmd_wz - measured_wz
+        self._yaw_error_integral = torch.where(
+            turning_mask,
+            torch.clamp(
+                self._yaw_error_integral + yaw_error * self.step_dt,
+                -float(self.cfg.yaw_integral_limit),
+                float(self.cfg.yaw_integral_limit),
+            ),
+            torch.zeros_like(self._yaw_error_integral),
+        )
+        yaw_correction = torch.where(
+            turning_mask,
+            float(self.cfg.yaw_rate_kp) * yaw_error + float(self.cfg.yaw_rate_ki) * self._yaw_error_integral,
+            torch.zeros_like(yaw_error),
+        )
+        wheel = torch.clamp(
+            wheel + self._yaw_correction_side_sign.unsqueeze(0) * yaw_correction.unsqueeze(-1),
             -float(self.cfg.max_abs_wheel_omega),
             float(self.cfg.max_abs_wheel_omega),
         )
@@ -231,8 +286,8 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             dim=-1,
         )
         self._previous_actions = self._actions.clone()
-        if self.cfg.obs_noise_std > 0.0:
-            obs = obs + torch.randn_like(obs) * self.cfg.obs_noise_std
+        if self.cfg.domain_rand.obs_noise_std > 0.0:
+            obs = obs + torch.randn_like(obs) * self.cfg.domain_rand.obs_noise_std
         return {"policy": obs}
 
     def _wheel_force_b_normalized(self) -> torch.Tensor:
@@ -245,29 +300,48 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         return torch.clamp(wheel_force_b / self.cfg.nominal_wheel_load, -3.0, 3.0)
 
     def _advance_command_curriculum(self) -> None:
-        if not self.cfg.command_resampling_enabled:
-            return
+        # Arc-length distance tracking runs unconditionally (it's ground-truth
+        # state, not a resampling mechanism): sum of true body speed * dt is
+        # robust to curved paths, unlike start/end displacement or any
+        # commanded/wheel-kinematic mileage estimate. Kept purely as a metric
+        # now that checkpoint chasing (below) owns command generation.
         dt = float(self.cfg.sim.dt) * float(self.cfg.decimation)
+        self._distance_traveled += torch.linalg.norm(self._robot.data.root_lin_vel_b[:, :2], dim=-1) * dt
+
+        # Pure pursuit is closed-loop control, not a resampling event: wz
+        # must be recomputed every step from the current heading error, so
+        # this runs unconditionally too (not gated by resampling_enabled).
+        pursuit_envs = (self._command_mode == 2).nonzero(as_tuple=False).flatten()
+        if len(pursuit_envs) > 0:
+            self._update_pursuit_commands(pursuit_envs)
+
+        if not self.cfg.commands.resampling_enabled:
+            return
         self._command_time_left -= dt
         resample_envs = (self._command_time_left <= 0.0).nonzero(as_tuple=False).flatten()
         if len(resample_envs) > 0:
             mission_envs = resample_envs[self._command_mode[resample_envs] == 1]
             if len(mission_envs) > 0:
                 self._advance_mission_commands(mission_envs)
-            primitive_envs = resample_envs[self._command_mode[resample_envs] != 1]
+            # Pursuit segments complete on checkpoint arrival, not the timer
+            # above — exclude them here so resampling_time_s can't cut a
+            # multi-checkpoint chase short.
+            primitive_envs = resample_envs[
+                (self._command_mode[resample_envs] != 1) & (self._command_mode[resample_envs] != 2)
+            ]
             if len(primitive_envs) > 0:
                 self._sample_commands(primitive_envs)
 
     def _update_execution_commands(self) -> None:
         self._exec_cmd_vx = torch.clamp(
             self._cmd_vx,
-            float(self.cfg.command_vx_range[0]),
-            float(self.cfg.command_vx_range[1]),
+            float(self.cfg.commands.vx_range[0]),
+            float(self.cfg.commands.vx_range[1]),
         )
         self._exec_cmd_wz = torch.clamp(
             self._cmd_wz,
-            float(self.cfg.command_wz_range[0]),
-            float(self.cfg.command_wz_range[1]),
+            float(self.cfg.commands.wz_range[0]),
+            float(self.cfg.commands.wz_range[1]),
         )
 
     def _termination_terms(self) -> dict[str, torch.Tensor]:
@@ -278,21 +352,21 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
         x_min, x_max, y_min, y_max = self._terrain.terrain_bounds
         out_of_bounds = (
-            (root_pos_w[:, 0] < x_min + self.cfg.episode_bounds_margin)
-            | (root_pos_w[:, 0] > x_max - self.cfg.episode_bounds_margin)
-            | (root_pos_w[:, 1] < y_min + self.cfg.episode_bounds_margin)
-            | (root_pos_w[:, 1] > y_max - self.cfg.episode_bounds_margin)
+            (root_pos_w[:, 0] < x_min + self.cfg.terminations.bounds_margin)
+            | (root_pos_w[:, 0] > x_max - self.cfg.terminations.bounds_margin)
+            | (root_pos_w[:, 1] < y_min + self.cfg.terminations.bounds_margin)
+            | (root_pos_w[:, 1] > y_max - self.cfg.terminations.bounds_margin)
         )
         bad_height = (
-            (root_pos_w[:, 2] < self.cfg.episode_min_base_height)
-            | (root_pos_w[:, 2] > self.cfg.episode_max_base_height)
+            (root_pos_w[:, 2] < self.cfg.terminations.min_base_height)
+            | (root_pos_w[:, 2] > self.cfg.terminations.max_base_height)
         )
         bad_velocity = (
-            torch.linalg.norm(root_lin_vel_w, dim=-1) > self.cfg.episode_max_lin_vel
+            torch.linalg.norm(root_lin_vel_w, dim=-1) > self.cfg.terminations.max_lin_vel
         ) | (
-            torch.linalg.norm(root_ang_vel_w, dim=-1) > self.cfg.episode_max_ang_vel
+            torch.linalg.norm(root_ang_vel_w, dim=-1) > self.cfg.terminations.max_ang_vel
         )
-        bad_tilt = (roll**2 + pitch**2) > (self.cfg.episode_tilt_limit**2)
+        bad_tilt = (roll**2 + pitch**2) > (self.cfg.terminations.tilt_limit**2)
         non_finite = (
             ~torch.isfinite(root_pos_w).all(dim=-1)
             | ~torch.isfinite(root_lin_vel_w).all(dim=-1)
@@ -320,19 +394,19 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         lin_vel_b = self._robot.data.root_lin_vel_b
 
         v_x = lin_vel_b[:, 0]
-        drive_active = torch.abs(self._exec_cmd_vx) >= self.cfg.command_min_abs_vx
+        drive_active = torch.abs(self._exec_cmd_vx) >= self.cfg.commands.min_abs_vx
 
         orientation_err = torch.square(roll) + torch.square(pitch)
         orientation_reward = torch.exp(
-            -orientation_err / (self.cfg.reward_orientation_sigma**2)
+            -orientation_err / (self.cfg.rewards.orientation_sigma**2)
         )
         roll_pitch_rate = torch.sum(torch.square(ang_vel_b[:, :2]), dim=-1)
 
         wheel_force_norm = torch.linalg.norm(self._wheel_force_b_normalized(), dim=-1)
-        loaded_wheels = (wheel_force_norm > float(self.cfg.contact_force_threshold)).float().sum(dim=-1)
-        contact_den = max(6.0 - float(self.cfg.contact_min_loaded_wheels), 1.0)
+        loaded_wheels = (wheel_force_norm > float(self.cfg.rewards.contact_force_threshold)).float().sum(dim=-1)
+        contact_den = max(6.0 - float(self.cfg.rewards.contact_min_loaded_wheels), 1.0)
         contact_support = torch.clamp(
-            (loaded_wheels - float(self.cfg.contact_min_loaded_wheels)) / contact_den,
+            (loaded_wheels - float(self.cfg.rewards.contact_min_loaded_wheels)) / contact_den,
             0.0,
             1.0,
         )
@@ -350,20 +424,39 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         soft_limit_margin = torch.clamp(torch.abs(susp_joint_pos) - 0.52, min=0.0)
         joint_limit_penalty = torch.sum(torch.square(soft_limit_margin), dim=-1)
 
+        # Privileged-only slip penalty (see RewardsCfg.slip_weight docstring):
+        # true_wz from root_ang_vel_b is sim ground truth; "expected" wheel
+        # speed is the no-slip skid-steer kinematic relationship (same
+        # left/right formula _apply_action uses for command->target, but
+        # geometric EFFECTIVE_TRACK only -- no yaw_track_scale calibration,
+        # since we want the true rolling-without-slip relationship here, not
+        # a command-to-target backend calibration).
+        true_wz = ang_vel_b[:, 2]
+        left_expected = (v_x - 0.5 * EFFECTIVE_TRACK * true_wz) / WHEEL_RADIUS
+        right_expected = (v_x + 0.5 * EFFECTIVE_TRACK * true_wz) / WHEEL_RADIUS
+        expected_wheel_omega = torch.stack(
+            (left_expected, right_expected, left_expected, right_expected, left_expected, right_expected), dim=-1
+        )
+        expected_wheel_omega = expected_wheel_omega * self._wheel_direction
+        actual_wheel_omega = self._robot.data.joint_vel[:, self._wheel_joint_ids]
+        slip_speed = (actual_wheel_omega - expected_wheel_omega) * WHEEL_RADIUS
+        slip_penalty = torch.mean(torch.square(slip_speed), dim=-1)
+
         terminated = self._termination_flags()
 
         return {
-            "orientation": self.cfg.reward_orientation_weight * orientation_reward,
-            "contact_support": self.cfg.reward_contact_support_weight * contact_support,
-            "wheel_load_balance": -self.cfg.reward_wheel_load_balance_weight * load_balance,
-            "roll_pitch_rate": -self.cfg.reward_roll_pitch_rate_weight * roll_pitch_rate,
-            "lin_vel_z": -self.cfg.reward_lin_vel_z_weight * torch.square(lin_vel_b[:, 2]),
-            "stuck": -self.cfg.reward_stuck_weight * stuck_penalty,
-            "action_rate": -self.cfg.reward_action_rate_weight * action_rate,
-            "hip_action_rate": -self.cfg.reward_hip_action_rate_weight * hip_action_rate,
-            "joint_limit": -self.cfg.reward_joint_limit_weight * joint_limit_penalty,
-            "alive": torch.full((self.num_envs,), self.cfg.reward_alive_bonus, device=self.device),
-            "termination": -self.cfg.reward_termination_penalty * terminated.float(),
+            "orientation": self.cfg.rewards.orientation_weight * orientation_reward,
+            "contact_support": self.cfg.rewards.contact_support_weight * contact_support,
+            "wheel_load_balance": -self.cfg.rewards.wheel_load_balance_weight * load_balance,
+            "roll_pitch_rate": -self.cfg.rewards.roll_pitch_rate_weight * roll_pitch_rate,
+            "lin_vel_z": -self.cfg.rewards.lin_vel_z_weight * torch.square(lin_vel_b[:, 2]),
+            "stuck": -self.cfg.rewards.stuck_weight * stuck_penalty,
+            "action_rate": -self.cfg.rewards.action_rate_weight * action_rate,
+            "hip_action_rate": -self.cfg.rewards.hip_action_rate_weight * hip_action_rate,
+            "joint_limit": -self.cfg.rewards.joint_limit_weight * joint_limit_penalty,
+            "slip": -self.cfg.rewards.slip_weight * slip_penalty,
+            "alive": torch.full((self.num_envs,), self.cfg.rewards.alive_bonus, device=self.device),
+            "termination": -self.cfg.rewards.termination_penalty * terminated.float(),
         }
 
     def _get_rewards(self) -> torch.Tensor:
@@ -402,7 +495,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         return terminated, time_out
 
     def _randomize_mass(self, env_ids: torch.Tensor) -> None:
-        lo, hi = self.cfg.body_mass_delta_range
+        lo, hi = self.cfg.domain_rand.body_mass_delta_range
         n = len(env_ids)
         delta = torch.rand(n) * (hi - lo) + lo
         masses = self._robot.root_physx_view.get_masses().clone()
@@ -420,6 +513,20 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         materials[env_ids_cpu, :, 0] = samples[:, :, 0]
         materials[env_ids_cpu, :, 1] = samples[:, :, 1]
         self._robot.root_physx_view.set_material_properties(materials, env_ids_cpu)
+
+    def _randomize_hip_actuator_gains(self, env_ids: torch.Tensor) -> None:
+        n = len(env_ids)
+        n_joints = len(self._susp_joint_ids)
+        klo, khi = self.cfg.domain_rand.hip_stiffness_scale_range
+        dlo, dhi = self.cfg.domain_rand.hip_damping_scale_range
+        stiffness_scale = torch.rand(n, n_joints, device=self.device) * (khi - klo) + klo
+        damping_scale = torch.rand(n, n_joints, device=self.device) * (dhi - dlo) + dlo
+        self._robot.write_joint_stiffness_to_sim(
+            self._default_hip_stiffness[env_ids] * stiffness_scale, joint_ids=self._susp_joint_ids, env_ids=env_ids
+        )
+        self._robot.write_joint_damping_to_sim(
+            self._default_hip_damping[env_ids] * damping_scale, joint_ids=self._susp_joint_ids, env_ids=env_ids
+        )
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None:
@@ -446,13 +553,16 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         for key, value in term_terms.items():
             extras[f"Episode_Termination/{key}"] = torch.count_nonzero(value[logged_env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[logged_env_ids]).item()
+        if len(logged_env_ids) > 0:
+            extras["Episode_Metric/distance_traveled_m"] = torch.mean(self._distance_traveled[logged_env_ids]).item()
         self.extras["log"] = extras
 
         super()._reset_idx(env_ids)
 
         self._randomize_friction(env_ids)
         self._randomize_mass(env_ids)
-        lo, hi = self.cfg.push_interval_steps
+        self._randomize_hip_actuator_gains(env_ids)
+        lo, hi = self.cfg.domain_rand.push_interval_steps
         self._push_countdown[env_ids] = torch.randint(lo, hi, (len(env_ids),), device=self.device)
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -472,6 +582,10 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._mission_phase[env_ids] = 0
         self._mission_turn_sign[env_ids] = 1.0
         self._mission_drive_sign[env_ids] = 1.0
+        self._distance_traveled[env_ids] = 0.0
+        self._pursuit_checkpoints_left[env_ids] = 0
+        self._pursuit_waypoint[env_ids] = 0.0
+        self._yaw_error_integral[env_ids] = 0.0
 
         self._sample_commands(env_ids)
 
@@ -482,7 +596,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
     def _sample_commands(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)
-        mission_prob = max(0.0, min(float(self.cfg.command_mission_prob), 1.0))
+        mission_prob = max(0.0, min(float(self.cfg.commands.mission_prob), 1.0))
         mission_mask = torch.rand(n, device=self.device) < mission_prob
         mission_ids = env_ids[mission_mask]
         primitive_ids = env_ids[~mission_mask]
@@ -497,49 +611,122 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         r = torch.rand(n, device=self.device)
         total = max(
             float(
-                self.cfg.command_stop_prob
-                + self.cfg.command_straight_prob
-                + self.cfg.command_turn_prob
-                + self.cfg.command_curve_prob
+                self.cfg.commands.stop_prob
+                + self.cfg.commands.straight_prob
+                + self.cfg.commands.turn_prob
+                + self.cfg.commands.curve_prob
+                + self.cfg.commands.pursuit_prob
             ),
             1.0e-6,
         )
-        stop_end = float(self.cfg.command_stop_prob) / total
-        straight_end = stop_end + float(self.cfg.command_straight_prob) / total
-        turn_end = straight_end + float(self.cfg.command_turn_prob) / total
-        curve_end = turn_end + float(self.cfg.command_curve_prob) / total
+        stop_end = float(self.cfg.commands.stop_prob) / total
+        straight_end = stop_end + float(self.cfg.commands.straight_prob) / total
+        turn_end = straight_end + float(self.cfg.commands.turn_prob) / total
+        curve_end = turn_end + float(self.cfg.commands.curve_prob) / total
+        pursuit_end = curve_end + float(self.cfg.commands.pursuit_prob) / total
 
         self._cmd_vx[env_ids] = 0.0
         self._cmd_wz[env_ids] = 0.0
         self._command_mode[env_ids] = 0
-        self._command_time_left[env_ids] = float(self.cfg.command_resampling_time_s)
+        self._command_time_left[env_ids] = float(self.cfg.commands.resampling_time_s)
 
-        vx_abs_hi = max(abs(self.cfg.command_vx_range[0]), abs(self.cfg.command_vx_range[1]))
-        wz_abs_hi = max(abs(self.cfg.command_wz_range[0]), abs(self.cfg.command_wz_range[1]))
+        vx_abs_hi = max(abs(self.cfg.commands.vx_range[0]), abs(self.cfg.commands.vx_range[1]))
+        wz_abs_hi = max(abs(self.cfg.commands.wz_range[0]), abs(self.cfg.commands.wz_range[1]))
 
         straight_mask = (r >= stop_end) & (r < straight_end)
         straight_ids = env_ids[straight_mask]
         if len(straight_ids) > 0:
             self._cmd_vx[straight_ids] = self._sample_abs_with_sign(
-                len(straight_ids), self.cfg.command_min_abs_vx, vx_abs_hi
+                len(straight_ids), self.cfg.commands.min_abs_vx, vx_abs_hi
             )
 
         turn_mask = (r >= straight_end) & (r < turn_end)
         turn_ids = env_ids[turn_mask]
         if len(turn_ids) > 0:
             self._cmd_wz[turn_ids] = self._sample_abs_with_sign(
-                len(turn_ids), self.cfg.command_min_abs_wz, wz_abs_hi
+                len(turn_ids), self.cfg.commands.min_abs_wz, wz_abs_hi
             )
         curve_mask = (r >= turn_end) & (r < curve_end)
         curve_ids = env_ids[curve_mask]
         if len(curve_ids) > 0:
             self._cmd_vx[curve_ids] = self._sample_abs_with_sign(
-                len(curve_ids), self.cfg.command_min_abs_vx, vx_abs_hi
+                len(curve_ids), self.cfg.commands.min_abs_vx, vx_abs_hi
             )
             self._cmd_wz[curve_ids] = self._sample_abs_with_sign(
-                len(curve_ids), self.cfg.command_min_abs_wz, wz_abs_hi
+                len(curve_ids), self.cfg.commands.min_abs_wz, wz_abs_hi
             )
+        pursuit_mask = (r >= curve_end) & (r < pursuit_end)
+        pursuit_ids = env_ids[pursuit_mask]
+        if len(pursuit_ids) > 0:
+            self._start_pursuit_command(pursuit_ids)
         self._update_execution_commands()
+
+    def _sample_pursuit_waypoint(self, env_ids: torch.Tensor) -> None:
+        """Sample one checkpoint per env, uniform inside the margin-shrunk
+        terrain bounds box (the same box/margin the out-of-bounds termination
+        check uses) — the goal is valid by construction, no path-shape
+        assumption needed (unlike clamping a travel *distance* along a ray,
+        which only approximates curved paths)."""
+        x_min, x_max, y_min, y_max = self._terrain.terrain_bounds
+        margin = float(self.cfg.terminations.bounds_margin)
+        n = len(env_ids)
+        self._pursuit_waypoint[env_ids, 0] = (
+            torch.rand(n, device=self.device) * ((x_max - margin) - (x_min + margin)) + (x_min + margin)
+        )
+        self._pursuit_waypoint[env_ids, 1] = (
+            torch.rand(n, device=self.device) * ((y_max - margin) - (y_min + margin)) + (y_min + margin)
+        )
+
+    def _update_pursuit_commands(self, env_ids: torch.Tensor) -> None:
+        """Pursuit guidance toward the current checkpoint.
+
+        Recomputes cmd_wz every step from the signed heading error to the
+        target (closed-loop) — cmd_vx stays at the cruise speed sampled when
+        this chase started. See CommandsCfg.pursuit_heading_gain for why this
+        uses a plain proportional law on the full -pi..pi bearing rather than
+        the textbook curvature formula. On arrival, advances to the next
+        checkpoint or, once the sequence is exhausted, falls back to
+        _sample_commands.
+        """
+        pos_xy = self._robot.data.root_pos_w[env_ids, :2]
+        heading = _quat_yaw(self._robot.data.root_quat_w[env_ids])
+        to_target = self._pursuit_waypoint[env_ids] - pos_xy
+        distance = torch.linalg.norm(to_target, dim=-1)
+
+        cos_h, sin_h = torch.cos(heading), torch.sin(heading)
+        lx = cos_h * to_target[:, 0] + sin_h * to_target[:, 1]
+        ly = -sin_h * to_target[:, 0] + cos_h * to_target[:, 1]
+        heading_error = torch.atan2(ly, lx)
+        wz_abs_hi = max(abs(self.cfg.commands.wz_range[0]), abs(self.cfg.commands.wz_range[1]))
+        self._cmd_wz[env_ids] = torch.clamp(
+            float(self.cfg.commands.pursuit_heading_gain) * heading_error, -wz_abs_hi, wz_abs_hi
+        )
+        self._update_execution_commands()
+
+        arrived = env_ids[distance < float(self.cfg.commands.pursuit_arrival_radius)]
+        if len(arrived) == 0:
+            return
+        self._pursuit_checkpoints_left[arrived] -= 1
+        continuing = arrived[self._pursuit_checkpoints_left[arrived] > 0]
+        done = arrived[self._pursuit_checkpoints_left[arrived] <= 0]
+        if len(continuing) > 0:
+            self._sample_pursuit_waypoint(continuing)
+        if len(done) > 0:
+            self._command_mode[done] = 0
+            self._sample_commands(done)
+
+    def _start_pursuit_command(self, env_ids: torch.Tensor) -> None:
+        """Sample a fresh cruise speed and the first checkpoint of a new
+        pure-pursuit chase (see _update_pursuit_commands)."""
+        n = len(env_ids)
+        self._command_mode[env_ids] = 2
+        self._pursuit_checkpoints_left[env_ids] = int(self.cfg.commands.pursuit_checkpoint_count)
+        vx_abs_hi = max(abs(self.cfg.commands.vx_range[0]), abs(self.cfg.commands.vx_range[1]))
+        self._cmd_vx[env_ids] = (
+            torch.rand(n, device=self.device) * (vx_abs_hi - self.cfg.commands.min_abs_vx)
+            + self.cfg.commands.min_abs_vx
+        )
+        self._sample_pursuit_waypoint(env_ids)
 
     def _start_mission_commands(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)

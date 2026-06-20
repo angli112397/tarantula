@@ -78,6 +78,12 @@ parser.add_argument(
     default=None,
     help="Maximum rl_curriculum terrain row to sample for resets.",
 )
+parser.add_argument(
+    "--pursuit-prob",
+    type=float,
+    default=None,
+    help="Opt in to pure-pursuit checkpoint-chasing commands (CommandsCfg.pursuit_prob defaults to 0.0).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.headless = True  # always headless for training
@@ -113,6 +119,24 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+# CommandsCfg field overrides per --command-profile. "mixed" (the default) is
+# the CommandsCfg() baseline as-is, so it has no entry here.
+COMMAND_PROFILES: dict[str, dict] = {
+    "yaw_only": dict(
+        stop_prob=0.0, straight_prob=0.0, turn_prob=1.0, curve_prob=0.0, mission_prob=0.0,
+        wz_range=(-0.25, 0.25), min_abs_wz=0.25,
+    ),
+    "mission": dict(
+        stop_prob=0.20, straight_prob=0.40, turn_prob=0.20, curve_prob=0.20, mission_prob=0.70,
+        vx_range=(-0.16, 0.16), wz_range=(-0.25, 0.25), min_abs_vx=0.08, min_abs_wz=0.12,
+    ),
+    "stage0": dict(
+        stop_prob=0.20, straight_prob=0.40, turn_prob=0.20, curve_prob=0.20, mission_prob=0.40,
+        vx_range=(-0.16, 0.16), wz_range=(-0.25, 0.25), min_abs_vx=0.08, min_abs_wz=0.12,
+    ),
+}
+
+
 def main():
     enable_extension("isaacsim.asset.importer.urdf")
     ensure_tarantula_usd()
@@ -131,38 +155,21 @@ def main():
     if args.max_abs_wheel_omega is not None:
         env_cfg.max_abs_wheel_omega = float(args.max_abs_wheel_omega)
     if args.action_rate_weight is not None:
-        env_cfg.reward_action_rate_weight = float(args.action_rate_weight)
+        env_cfg.rewards.action_rate_weight = float(args.action_rate_weight)
     if args.command_resampling_time is not None:
-        env_cfg.command_resampling_time_s = float(args.command_resampling_time)
-    if args.command_profile == "yaw_only":
-        env_cfg.command_stop_prob = 0.0
-        env_cfg.command_straight_prob = 0.0
-        env_cfg.command_turn_prob = 1.0
-        env_cfg.command_curve_prob = 0.0
-        env_cfg.command_mission_prob = 0.0
-        env_cfg.command_wz_range = (-0.25, 0.25)
-        env_cfg.command_min_abs_wz = 0.25
-    elif args.command_profile == "mission":
-        env_cfg.command_stop_prob = 0.20
-        env_cfg.command_straight_prob = 0.40
-        env_cfg.command_turn_prob = 0.20
-        env_cfg.command_curve_prob = 0.20
-        env_cfg.command_mission_prob = 0.70
-        env_cfg.command_vx_range = (-0.16, 0.16)
-        env_cfg.command_wz_range = (-0.25, 0.25)
-        env_cfg.command_min_abs_vx = 0.08
-        env_cfg.command_min_abs_wz = 0.12
-    elif args.command_profile == "stage0":
-        env_cfg.command_stop_prob = 0.20
-        env_cfg.command_straight_prob = 0.40
-        env_cfg.command_turn_prob = 0.20
-        env_cfg.command_curve_prob = 0.20
-        env_cfg.command_mission_prob = 0.40
-        env_cfg.command_vx_range = (-0.16, 0.16)
-        env_cfg.command_wz_range = (-0.25, 0.25)
-        env_cfg.command_min_abs_vx = 0.08
-        env_cfg.command_min_abs_wz = 0.12
-        env_cfg.obs_noise_std = min(float(env_cfg.obs_noise_std), 0.01)
+        env_cfg.commands.resampling_time_s = float(args.command_resampling_time)
+    if args.command_profile in COMMAND_PROFILES:
+        env_cfg.commands = env_cfg.commands.replace(**COMMAND_PROFILES[args.command_profile])
+    if args.command_profile == "stage0":
+        env_cfg.domain_rand.obs_noise_std = min(float(env_cfg.domain_rand.obs_noise_std), 0.01)
+        # Opt in to push perturbation DR per DomainRandCfg's docstring in
+        # suspension_env_cfg.py: stage0 trains after the deterministic
+        # baseline already proves stable posture control, so it's safe to
+        # add random pushes here without confusing them with contact bugs.
+        env_cfg.domain_rand.push_interval_steps = (150, 300)
+        env_cfg.domain_rand.push_lin_vel_range = (-0.2, 0.2)
+    if args.pursuit_prob is not None:
+        env_cfg.commands = env_cfg.commands.replace(pursuit_prob=float(args.pursuit_prob))
 
     agent_cfg = TarantulaSuspensionPPORunnerCfg()
     agent_cfg.max_iterations = args.max_iterations

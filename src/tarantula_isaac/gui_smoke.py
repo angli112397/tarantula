@@ -31,6 +31,10 @@ parser.add_argument("--settle-seconds", type=float, default=1.0)
 parser.add_argument("--drive-seconds", type=float, default=5.0)
 parser.add_argument("--cmd-vx", type=float, default=0.12)
 parser.add_argument("--cmd-wz", type=float, default=0.0)
+parser.add_argument("--pursuit", action="store_true",
+                     help="Drive pure-pursuit checkpoint chasing (cmd_vx as cruise speed) instead of a fixed cmd_vel.")
+parser.add_argument("--pursuit-checkpoints", type=int, default=None,
+                     help="Override CommandsCfg.pursuit_checkpoint_count for this smoke run.")
 parser.add_argument("--drive-scale", type=float, default=None)
 parser.add_argument("--yaw-track-scale", type=float, default=None)
 parser.add_argument("--push-lin-vel", type=float, default=0.0, help="Max random push velocity for smoke. Default 0 disables training perturbations.")
@@ -40,6 +44,11 @@ parser.add_argument("--max-tilt-deg", type=float, default=25.0)
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
 args.enable_cameras = False
+if args.pursuit and args.drive_seconds == parser.get_default("drive_seconds"):
+    # A single checkpoint chase at smoke-test cruise speed routinely takes
+    # 30-60s+ depending on sampled distance -- the 5s fixed-cmd_vel default
+    # would barely move before the test ends.
+    args.drive_seconds = 60.0
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -62,6 +71,46 @@ def _set_command(env: TarantulaSuspensionEnv, vx: float, wz: float) -> None:
     env._cmd_vx[:] = float(vx)
     env._cmd_wz[:] = float(wz)
     env._update_execution_commands()
+
+
+def _drive_pursuit(env: TarantulaSuspensionEnv, action: torch.Tensor, cmd_vx: float, count: int,
+                    sleep_s: float, step_dt: float) -> None:
+    """Start a pure-pursuit checkpoint chase for env 0 and step through it,
+    logging on every checkpoint/command-mode transition so the GUI run is
+    legible without printing every step. _update_pursuit_commands (called
+    each step via _get_observations -> _advance_command_curriculum) recomputes
+    cmd_wz from heading error on its own; this just starts the chase, holds a
+    fixed cruise cmd_vx, and narrates."""
+    env_ids = torch.tensor([0], device=env.device)
+    env._start_pursuit_command(env_ids)
+    env._cmd_vx[env_ids] = float(cmd_vx)
+    env._update_execution_commands()
+    print(f"[gui_smoke] pursuit started: checkpoint_count={int(env._pursuit_checkpoints_left[0].item())} "
+          f"cruise_vx={cmd_vx:.3f} waypoint_0={env._pursuit_waypoint[0].detach().cpu().numpy().round(3).tolist()}",
+          flush=True)
+
+    last_checkpoints_left = int(env._pursuit_checkpoints_left[0].item())
+    last_mode = int(env._command_mode[0].item())
+    last_heartbeat = -1
+    for step_i in range(count):
+        env.step(action)
+        if sleep_s > 0.0:
+            time.sleep(sleep_s)
+        t_s = step_i * step_dt
+        checkpoints_left = int(env._pursuit_checkpoints_left[0].item())
+        mode = int(env._command_mode[0].item())
+        pos = env._robot.data.root_pos_w[0, :2].detach().cpu().numpy().round(3).tolist()
+        if checkpoints_left != last_checkpoints_left or mode != last_mode:
+            print(f"[gui_smoke] t={t_s:5.1f}s pos={pos} command_mode={mode} "
+                  f"pursuit_checkpoints_left={checkpoints_left} "
+                  f"waypoint={env._pursuit_waypoint[0].detach().cpu().numpy().round(3).tolist()}", flush=True)
+            last_checkpoints_left, last_mode = checkpoints_left, mode
+        elif int(t_s // 5.0) != last_heartbeat:
+            last_heartbeat = int(t_s // 5.0)
+            to_target = env._pursuit_waypoint[0].detach().cpu().numpy() - pos
+            distance = float((to_target[0] ** 2 + to_target[1] ** 2) ** 0.5)
+            print(f"[gui_smoke] t={t_s:5.1f}s pos={pos} distance_to_waypoint={distance:.2f}m "
+                  f"cmd_wz={float(env._exec_cmd_wz[0].item()):.3f}", flush=True)
 
 
 def _step(env: TarantulaSuspensionEnv, action: torch.Tensor, count: int, sleep_s: float) -> None:
@@ -104,10 +153,15 @@ def main() -> None:
     if args.yaw_track_scale is not None:
         cfg.yaw_track_scale = float(args.yaw_track_scale)
     push = abs(float(args.push_lin_vel))
-    cfg.push_lin_vel_range = (-push, push)
-    cfg.push_interval_steps = (10_000_000, 10_000_001)
+    cfg.domain_rand.push_lin_vel_range = (-push, push)
+    # Disabled sentinel only when push is actually off — otherwise the
+    # interval never fires within a short smoke run and --push-lin-vel is a
+    # no-op despite the configured magnitude.
+    cfg.domain_rand.push_interval_steps = (150, 300) if push > 0.0 else (10_000_000, 10_000_001)
     cfg.scene.num_envs = 1
-    cfg.command_resampling_enabled = False
+    cfg.commands.resampling_enabled = False
+    if args.pursuit_checkpoints is not None:
+        cfg.commands.pursuit_checkpoint_count = int(args.pursuit_checkpoints)
     cfg.terrain = make_shared_heightmap_terrain_cfg(
         args.terrain_dir,
         min_level=args.terrain_level_min,
@@ -130,8 +184,12 @@ def main() -> None:
     start_xy = env._robot.data.root_pos_w[0, :2].clone()
     print(f"[gui_smoke] after_settle={start}", flush=True)
 
-    _set_command(env, args.cmd_vx, args.cmd_wz)
-    _step(env, action, _steps(cfg, args.drive_seconds), args.wall_sleep)
+    if args.pursuit:
+        step_dt = float(cfg.sim.dt) * float(cfg.decimation)
+        _drive_pursuit(env, action, args.cmd_vx, _steps(cfg, args.drive_seconds), args.wall_sleep, step_dt)
+    else:
+        _set_command(env, args.cmd_vx, args.cmd_wz)
+        _step(env, action, _steps(cfg, args.drive_seconds), args.wall_sleep)
     end = _metrics(env)
     end_xy = env._robot.data.root_pos_w[0, :2].clone()
     displacement = float(torch.linalg.norm(end_xy - start_xy).item())

@@ -9,27 +9,34 @@ grid and be combined without coordinate conversion.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from .exporters import (
+    GENERATOR_SCHEMA_VERSION,
     export_height_assets,
     export_navigation_mesh_contact_world_sdf,
     export_navigation_world_sdf,
     export_obj,
     export_terrain_sdf,
+    occupancy_to_pgm_image,
+    scaled_cost_to_pgm_image,
+    write_map_yaml,
+    write_pgm,
 )
 from .generator import generate_heightmap
-from .terrain_cfg import RL_CURRICULUM
+from .terrain_cfg import RL_CURRICULUM, TerrainCfg
 
 
 @dataclass(frozen=True)
 class NavMazeCfg:
-    size_x: float = RL_CURRICULUM.size_x
-    size_y: float = RL_CURRICULUM.size_y
-    resolution: float = RL_CURRICULUM.resolution
+    # Grid geometry is delegated to a TerrainCfg rather than copied, so it
+    # can't silently drift from RL_CURRICULUM (nav_maze reuses its heightmap
+    # generator and must share the same grid). Wall/door fields below are
+    # maze-layout concepts with no TerrainCfg equivalent, kept independent.
+    terrain: TerrainCfg = RL_CURRICULUM
     wall_thickness: float = 0.22
     wall_height: float = 1.10
     door_width: float = 5.20
@@ -37,12 +44,24 @@ class NavMazeCfg:
     obstacle_count: int = 3
 
     @property
+    def size_x(self) -> float:
+        return self.terrain.size_x
+
+    @property
+    def size_y(self) -> float:
+        return self.terrain.size_y
+
+    @property
+    def resolution(self) -> float:
+        return self.terrain.resolution
+
+    @property
     def nx(self) -> int:
-        return int(round(self.size_x / self.resolution)) + 1
+        return self.terrain.nx
 
     @property
     def ny(self) -> int:
-        return int(round(self.size_y / self.resolution)) + 1
+        return self.terrain.ny
 
 
 # Pad positions designed for the default 24x16 arena.
@@ -62,15 +81,9 @@ _PAD_CLEAR_SIZE = 4.8  # m — enough room for skid-steer turns without wall con
 
 def _local_relief(height: np.ndarray, radius_cells: int) -> np.ndarray:
     padded = np.pad(height, radius_cells, mode="edge")
-    local_min = np.full_like(height, np.inf, dtype=np.float32)
-    local_max = np.full_like(height, -np.inf, dtype=np.float32)
-    window = range(2 * radius_cells + 1)
-    for dy in window:
-        for dx in window:
-            patch = padded[dy : dy + height.shape[0], dx : dx + height.shape[1]]
-            local_min = np.minimum(local_min, patch)
-            local_max = np.maximum(local_max, patch)
-    return local_max - local_min
+    window = 2 * radius_cells + 1
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (window, window))
+    return windows.max(axis=(-2, -1)) - windows.min(axis=(-2, -1))
 
 
 def _compute_traversability_cost(height: np.ndarray, occ: np.ndarray, cfg: NavMazeCfg) -> tuple[np.ndarray, dict]:
@@ -272,8 +285,9 @@ def _trim_rects_around_pads(rects: list[dict]) -> list[dict]:
     return result
 
 
-def generate_nav_maze(cfg: NavMazeCfg, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict], dict]:
-    rng = np.random.default_rng(seed)
+def _build_maze_layout(cfg: NavMazeCfg, rng: np.random.Generator) -> tuple[np.ndarray, list[dict]]:
+    """Lay out boundary/interior walls and obstacle blocks; return (occupancy, wall_rects)."""
+
     occ = np.zeros((cfg.ny, cfg.nx), dtype=bool)
     rects: list[dict] = []
 
@@ -330,15 +344,32 @@ def generate_nav_maze(cfg: NavMazeCfg, seed: int) -> tuple[np.ndarray, np.ndarra
     for cx, cy in _PAD_POSITIONS:
         _clear_rect(occ, cfg, cx, cy, _PAD_CLEAR_SIZE, _PAD_CLEAR_SIZE)
 
-    height, height_metadata = generate_heightmap(RL_CURRICULUM, seed)
+    return occ, rects
+
+
+def _build_cost_layers(
+    height: np.ndarray, occ: np.ndarray, cfg: NavMazeCfg
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Derive (traversability_cost, speed_mask, traversability_stats) from height+occupancy."""
+
+    traversability_cost, traversability_stats = _compute_traversability_cost(height, occ, cfg)
+    speed_mask = _compute_speed_mask(traversability_cost, occ, cfg)
+    return traversability_cost, speed_mask, traversability_stats
+
+
+def generate_nav_maze(cfg: NavMazeCfg, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict], dict]:
+    rng = np.random.default_rng(seed)
+    occ, rects = _build_maze_layout(cfg, rng)
+
+    height, height_metadata = generate_heightmap(cfg.terrain, seed)
     if height.shape != (cfg.ny, cfg.nx):
         raise ValueError(f"height layer shape {height.shape} does not match occupancy shape {(cfg.ny, cfg.nx)}")
     for cx, cy in _PAD_POSITIONS:
         _clear_rect(height, cfg, cx, cy, _PAD_CLEAR_SIZE, _PAD_CLEAR_SIZE)
-    traversability_cost, traversability_stats = _compute_traversability_cost(height, occ, cfg)
-    speed_mask = _compute_speed_mask(traversability_cost, occ, cfg)
+    traversability_cost, speed_mask, traversability_stats = _build_cost_layers(height, occ, cfg)
     spawn_pad = _PAD_POSITIONS[0]
     metadata = {
+        "generator_schema_version": GENERATOR_SCHEMA_VERSION,
         "preset": "nav_maze",
         "seed": seed,
         "size_x": cfg.size_x,
@@ -383,25 +414,6 @@ def generate_nav_maze(cfg: NavMazeCfg, seed: int) -> tuple[np.ndarray, np.ndarra
     return height, occ, traversability_cost, speed_mask, rects, metadata
 
 
-def _write_pgm(path: Path, occ: np.ndarray) -> None:
-    # ROS map_server treats image column 0 as origin.x and image row 0 as the
-    # map's top row. Our occupancy rows are stored south-to-north, so only rows
-    # are flipped when writing the image; x columns stay in Gazebo/world order.
-    image = np.where(occ[::-1, :], 0, 254).astype(np.uint8)
-    with path.open("wb") as f:
-        f.write(f"P5\n{image.shape[1]} {image.shape[0]}\n255\n".encode("ascii"))
-        f.write(image.tobytes())
-
-
-def _write_occupancy_values_pgm(path: Path, cost: np.ndarray) -> None:
-    # Cost convention is 0/free .. 100/lethal. ROS map images use white/free
-    # and black/occupied, with rows flipped to match map_server's image origin.
-    image = np.rint(254.0 - np.clip(cost[::-1, :].astype(np.float32), 0.0, 100.0) / 100.0 * 254.0).astype(np.uint8)
-    with path.open("wb") as f:
-        f.write(f"P5\n{image.shape[1]} {image.shape[0]}\n255\n".encode("ascii"))
-        f.write(image.tobytes())
-
-
 def export_nav_maze(
     out_dir: Path,
     height: np.ndarray,
@@ -416,53 +428,17 @@ def export_nav_maze(
     np.save(out_dir / "occupancy.npy", occ.astype(np.bool_))
     np.save(out_dir / "traversability_cost.npy", traversability_cost.astype(np.uint8))
     np.save(out_dir / "terrain_speed_mask.npy", speed_mask.astype(np.uint8))
-    _write_pgm(out_dir / "map.pgm", occ)
-    _write_occupancy_values_pgm(out_dir / "terrain_cost_map.pgm", traversability_cost)
-    _write_occupancy_values_pgm(out_dir / "terrain_speed_mask.pgm", speed_mask)
-    (out_dir / "map.yaml").write_text(
-        "\n".join(
-            [
-                "image: map.pgm",
-                "mode: trinary",
-                f"resolution: {float(metadata['resolution']):.6f}",
-                f"origin: [{-float(metadata['size_x']) / 2.0:.6f}, {-float(metadata['size_y']) / 2.0:.6f}, 0.0]",
-                "negate: 0",
-                "occupied_thresh: 0.65",
-                "free_thresh: 0.25",
-                "",
-            ]
-        ),
-        encoding="ascii",
+    write_pgm(out_dir / "map.pgm", occupancy_to_pgm_image(occ))
+    write_pgm(out_dir / "terrain_cost_map.pgm", scaled_cost_to_pgm_image(traversability_cost))
+    write_pgm(out_dir / "terrain_speed_mask.pgm", scaled_cost_to_pgm_image(speed_mask))
+    write_map_yaml(out_dir / "map.yaml", "map.pgm", "trinary", metadata, occupied_thresh=0.65, free_thresh=0.25)
+    write_map_yaml(
+        out_dir / "terrain_cost_map.yaml", "terrain_cost_map.pgm", "scale", metadata,
+        occupied_thresh=1.0, free_thresh=0.0,
     )
-    (out_dir / "terrain_cost_map.yaml").write_text(
-        "\n".join(
-            [
-                "image: terrain_cost_map.pgm",
-                "mode: scale",
-                f"resolution: {float(metadata['resolution']):.6f}",
-                f"origin: [{-float(metadata['size_x']) / 2.0:.6f}, {-float(metadata['size_y']) / 2.0:.6f}, 0.0]",
-                "negate: 0",
-                "occupied_thresh: 1.0",
-                "free_thresh: 0.0",
-                "",
-            ]
-        ),
-        encoding="ascii",
-    )
-    (out_dir / "terrain_speed_mask.yaml").write_text(
-        "\n".join(
-            [
-                "image: terrain_speed_mask.pgm",
-                "mode: scale",
-                f"resolution: {float(metadata['resolution']):.6f}",
-                f"origin: [{-float(metadata['size_x']) / 2.0:.6f}, {-float(metadata['size_y']) / 2.0:.6f}, 0.0]",
-                "negate: 0",
-                "occupied_thresh: 1.0",
-                "free_thresh: 0.0",
-                "",
-            ]
-        ),
-        encoding="ascii",
+    write_map_yaml(
+        out_dir / "terrain_speed_mask.yaml", "terrain_speed_mask.pgm", "scale", metadata,
+        occupied_thresh=1.0, free_thresh=0.0,
     )
     obj_path = export_obj(out_dir, height, float(metadata["resolution"]))
     terrain_sdf = export_terrain_sdf(out_dir, obj_path)
@@ -506,9 +482,7 @@ def main() -> None:
     parser.add_argument("--obstacle-count", type=int, default=defaults.obstacle_count)
     args = parser.parse_args()
     cfg = NavMazeCfg(
-        size_x=args.size_x,
-        size_y=args.size_y,
-        resolution=args.resolution,
+        terrain=replace(RL_CURRICULUM, size_x=args.size_x, size_y=args.size_y, resolution=args.resolution),
         wall_height=args.wall_height,
         wall_thickness=args.wall_thickness,
         door_width=args.door_width,

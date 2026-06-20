@@ -21,6 +21,7 @@ class VehicleGeometry:
     wheel_center_track: float
     overall_length: float
     overall_width: float
+    total_mass: float
 
     @property
     def reference_length(self) -> float:
@@ -91,6 +92,10 @@ def load_vehicle_geometry() -> VehicleGeometry:
     pivot_mx = _evaluate_property("pivot_mx", raw, resolved)
     pivot_y = _evaluate_property("pivot_y", raw, resolved)
     wheel_lateral_offset = _evaluate_property("v2_wheel_lateral_offset", raw, resolved)
+    body_mass = _evaluate_property("body_mass", raw, resolved)
+    arm_mass = _evaluate_property("arm_mass", raw, resolved)
+    wheel_mass = _evaluate_property("wheel_mass", raw, resolved)
+    total_mass = body_mass + 6.0 * (arm_mass + wheel_mass)
 
     arm_x = arm_length * math.cos(arm_angle)
     wheel_x_positions = (
@@ -106,6 +111,7 @@ def load_vehicle_geometry() -> VehicleGeometry:
         wheel_center_track=wheel_center_track,
         overall_length=max(wheel_x_positions) - min(wheel_x_positions) + 2.0 * wheel_radius,
         overall_width=wheel_center_track + 2.0 * wheel_radius,
+        total_mass=total_mass,
     )
 
 

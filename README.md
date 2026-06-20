@@ -77,7 +77,10 @@ Isaac Lab, then the spawn/goal pads are flattened. This is the shared baseline
 for later “one grayscale height layer + one occupancy layer” experiments.
 Gazebo Nav2 smoke tests use `world.sdf`, which keeps a thick flat contact floor
 for stable skid-steer wheel contact and overlays the terrain mesh as visual
-context. Use `world_mesh_contact.sdf` only for explicit mesh-contact A/B tests.
+context. Use `world_mesh_contact.sdf` for explicit mesh-contact A/B tests
+(e.g. `scripts/gazebo_pursuit_eval.py` on `rl_curriculum`) -- this contact mode
+is calibrated and works (see `docs/00-project-plan.md`'s Gazebo world policy),
+migrating the Nav2 demo to it is just not done yet.
 
 Static-map Nav2 uses three maps at once: `map.yaml` is the pure occupancy map
 for AMCL localization on `/map`; `terrain_cost_map.yaml` is published on
@@ -225,6 +228,23 @@ scripts/gazebo_posture_eval.py \
   --out-dir generated/benchmarks/posture_eval/no_rl_flat
 ```
 
+For a route-based A/B comparison (same checkpoint sequence, RL on vs off),
+use `gazebo_pursuit_eval.py` against an unwalled-interior world (e.g.
+`rl_curriculum`, not `nav_maze` -- pure pursuit has no obstacle avoidance)
+with `bridge_ground_truth_odom:=true`, then diff the two summaries:
+
+```bash
+scripts/gazebo_pursuit_eval.py --label no_rl --seed 7 \
+  --out-dir generated/benchmarks/pursuit_eval/no_rl
+# relaunch sim.launch.py with posture_policy_enabled:=true policy_weights_npz:=...
+scripts/gazebo_pursuit_eval.py --label rl_active --seed 7 \
+  --out-dir generated/benchmarks/pursuit_eval/rl_active
+scripts/gazebo_eval_compare.py \
+  generated/benchmarks/pursuit_eval/no_rl/summary.json \
+  generated/benchmarks/pursuit_eval/rl_active/summary.json \
+  --label-a no_rl --label-b rl_active
+```
+
 ## Isaac Lab RL
 
 Current policy contract:
@@ -255,8 +275,13 @@ python3 src/tarantula_isaac/train_v5.py \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
   --terrain-level-min 0 \
   --terrain-level-max 0 \
-  --command-profile stage0
+  --command-profile stage0 \
+  --pursuit-prob 0.3
 ```
+
+`--pursuit-prob` opts into pure-pursuit checkpoint-chasing commands
+(default 0.0/off); friction and hip stiffness/damping domain randomization
+are on by default (see docs/03-isaac-lab-setup.md).
 
 Export:
 
@@ -287,6 +312,12 @@ python3 src/tarantula_isaac/gui_smoke.py \
   --cmd-vx 0.20 \
   --cmd-wz 0.40
 ```
+
+Add `--pursuit [--pursuit-checkpoints N]` to drive a pure-pursuit checkpoint
+chase instead of a fixed cmd_vel (zero hip action throughout -- pursuit
+steering is wheel-only, independent of the RL policy, so this isolates
+whether checkpoint-chasing itself works on the shared terrain). Logs on every
+checkpoint/command-mode transition plus a 5s heartbeat.
 
 ## Acceptance
 

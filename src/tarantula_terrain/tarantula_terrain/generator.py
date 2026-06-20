@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 
+from .exporters import GENERATOR_SCHEMA_VERSION
 from .terrain_cfg import TerrainCfg
 
 
@@ -94,9 +95,18 @@ def _soften_edges(height, passes=2):
     return smoothed
 
 
-def _clear_spawn(height, x, y, radius):
-    mask = (x * x + y * y) <= radius * radius
-    height[mask] = 0.0
+def _clear_spawn(height, x, y, radius, feather=0.0):
+    dist = np.sqrt(x * x + y * y)
+    if feather <= 0.0:
+        height[dist <= radius] = 0.0
+        return
+    # Smoothstep fade from 0 at the center to the unmodified terrain at
+    # radius+feather, so the cleared disk doesn't leave a hard step at its
+    # boundary -- a generic blur pass can't reliably erase that step (its
+    # strength depends on how steep the surrounding terrain happens to be),
+    # this is exact regardless.
+    t = np.clip((dist - radius) / feather, 0.0, 1.0)
+    height *= t * t * (3.0 - 2.0 * t)
 
 
 def _clear_platform(height, x, y, cx, cy, size):
@@ -219,6 +229,16 @@ def _generate_rl_curriculum(cfg: TerrainCfg, rng, x, y):
                     "xyz": [label["center"][0], label["center"][1], 0.20],
                 }
             )
+    # Each tile's feature (_add_slope/_add_wave/etc.) only touches height
+    # inside its own rectangular mask; nothing tapers it to 0 at that mask's
+    # edge, so wherever a feature doesn't happen to reach 0 right at the
+    # boundary, the unsmoothed array has a literal near-vertical wall there
+    # (observed: 0.113m of rise collapsing to 0 within one 0.1m grid cell --
+    # not an intended difficulty step, a generation artifact a 0.13m-radius
+    # wheel can get physically wedged against). _generate_gazebo_demo already
+    # does this; curriculum tiles have larger feature amplitudes at high
+    # difficulty so use more passes.
+    height = _soften_edges(height, passes=3)
     return height, labels, origins
 
 
@@ -233,10 +253,11 @@ def generate_heightmap(cfg: TerrainCfg, seed: int):
     else:
         raise ValueError(f"unsupported terrain preset: {cfg.preset}")
 
-    _clear_spawn(height, x, y, cfg.spawn_clear_radius)
+    _clear_spawn(height, x, y, cfg.spawn_clear_radius, feather=0.5)
     height = np.clip(height, cfg.min_height, cfg.max_height).astype(np.float32)
 
     metadata = {
+        "generator_schema_version": GENERATOR_SCHEMA_VERSION,
         "preset": cfg.preset,
         "seed": seed,
         "size_x": cfg.size_x,

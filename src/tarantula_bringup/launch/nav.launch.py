@@ -17,6 +17,11 @@ def generate_launch_description():
     """
     bringup_dir = get_package_share_directory('tarantula_bringup')
     params_file = LaunchConfiguration('params_file')
+    # SLAM has no precomputed terrain_cost_map (that needs a known heightmap
+    # ahead of time); this overlay repoints the costmap static layer at
+    # slam_toolbox's /map instead of nav2.yaml's static-map default. See
+    # nav2_slam_costmap_overlay.yaml for the full rationale.
+    slam_costmap_overlay = LaunchConfiguration('slam_costmap_overlay')
     cmd_vel_remap = ('cmd_vel', LaunchConfiguration('cmd_vel_topic'))
     odom_override = {'odom_topic': LaunchConfiguration('odom_topic')}
 
@@ -33,14 +38,17 @@ def generate_launch_description():
     controller = Node(
         package='nav2_controller',
         executable='controller_server',
-        parameters=[params_file, odom_override],
+        # local_costmap lives inside controller_server; overlay must come
+        # after params_file so its keys win.
+        parameters=[params_file, slam_costmap_overlay, odom_override],
         remappings=[cmd_vel_remap],
         output='screen')
 
     planner = Node(
         package='nav2_planner',
         executable='planner_server',
-        parameters=[params_file],
+        # global_costmap lives inside planner_server; same override ordering.
+        parameters=[params_file, slam_costmap_overlay],
         output='screen')
 
     behaviors = Node(
@@ -69,6 +77,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('params_file', default_value=os.path.join(
             bringup_dir, 'config', 'nav2.yaml')),
+        DeclareLaunchArgument('slam_costmap_overlay', default_value=os.path.join(
+            bringup_dir, 'config', 'nav2_slam_costmap_overlay.yaml'),
+            description='Costmap static-layer override for SLAM mode (no precomputed terrain_cost_map)'),
         DeclareLaunchArgument(
             'cmd_vel_topic', default_value='/cmd_vel',
             description='Nav2 controller output topic; use /diff_drive_controller/cmd_vel_unstamped for official diff_drive_controller'),

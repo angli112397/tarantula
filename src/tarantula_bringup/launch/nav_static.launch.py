@@ -26,15 +26,18 @@ def generate_launch_description():
     cmd_vel_remap = ('cmd_vel', LaunchConfiguration('cmd_vel_topic'))
     odom_override = {'odom_topic': LaunchConfiguration('odom_topic')}
 
+    # Static-map localization needs continuous scan updates. On the
+    # mesh-contact validation world, scan_gate.py's 3 deg default starves AMCL
+    # as soon as the robot climbs a small bump, freezing map->odom. One shared
+    # 8 deg gate works for both worlds we ship: the flat-floor baseline barely
+    # tilts at all (passive/frozen suspension, no terrain relief), so it never
+    # gets near either threshold — loosening the gate costs nothing there
+    # while fixing the mesh-contact case. No per-world toggle needed.
     scan_gate = Node(
         package='tarantula_control',
         executable='scan_gate',
         parameters=[{
             'use_sim_time': True,
-            # Static-map localization needs continuous scan updates. On the
-            # mesh-contact validation world, a 3 deg gate starves AMCL as soon
-            # as the robot climbs a small bump, freezing map->odom. Keep this
-            # permissive until active suspension reduces roll/pitch.
             'tilt_gate': 0.14,
         }],
         output='screen')

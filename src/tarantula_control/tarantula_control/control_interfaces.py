@@ -21,11 +21,17 @@ DEFAULT_TRACK_SCALE = 1.0
 # above nav2 max (0.6 m/s). URDF joint velocity limit is 30 rad/s.
 MAX_ABS_WHEEL_OMEGA = 6.0
 
-# Calibrated wheel-load reference for F/T normalization (RL observation).
-# 23.1 kg is the measured effective supported mass per 6-wheel average at nominal
-# suspension angle; total robot mass is ~33 kg but unsprung arm/wheel mass shifts
-# the per-wheel contact load distribution.
-NOMINAL_WHEEL_LOAD = 23.1 * 9.81 / 6.0
+# Wheel-load reference for F/T normalization (RL observation), derived from
+# the same URDF VEHICLE_GEOMETRY.total_mass everything else uses -- NOT the
+# old hardcoded 23.1 kg. That number was checked against an actual settled
+# Isaac Lab rollout (2026-06-19): real per-wheel contact force averaged
+# ~54.5 N, matching total_mass/6*g (53.96 N) almost exactly, not 23.1's
+# implied 37.77 N. The "unsprung mass reduces effective load" story this
+# constant used to be justified by does not hold empirically -- weight is
+# transmitted to the ground through the wheels regardless of sprung/unsprung
+# classification. Must equal suspension_env_cfg.py's nominal_wheel_load --
+# training and deployment normalize wheel_force_b by this same constant.
+NOMINAL_WHEEL_LOAD = VEHICLE_GEOMETRY.total_mass * 9.81 / 6.0
 
 LEFT_LEGS = ("fl", "ml", "rl")
 RIGHT_LEGS = ("fr", "mr", "rr")

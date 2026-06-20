@@ -100,9 +100,25 @@ Gazebo world policy:
   contact floor for stable skid-steer wheel contact, overlays the rough terrain
   mesh as visual context, and adds occupancy wall boxes.
 - `world_mesh_contact.sdf` is an explicit A/B test world. It removes the flat
-  floor and lets wheels contact the height mesh with isotropic `mu/mu2=1.5`,
-  small `slip1/slip2=0.001`, and stiff ODE contact settings. Do not use it as
-  the default Nav2 acceptance gate until mesh-contact behavior is calibrated.
+  floor and lets wheels contact the height mesh directly (same
+  `exporters.SurfaceProps`/`DEFAULT_SURFACE` stiff-contact tuning every world
+  uses). As of 2026-06-20 this contact mode is calibrated and works (see
+  `motion_control.py`'s `MotionControlConfig` docstring: stiff ODE contact
+  *and* closed-loop `yaw_rate_kp`/`yaw_rate_ki` are both required, neither
+  alone is enough) -- migrating the Nav2 demo to it is a deliberate,
+  not-yet-done follow-up (would need AMCL/SLAM/costmap/DWB revalidation on the
+  new contact surface), not a blocked/uncalibrated path anymore.
+- `rl_curriculum`'s `world.sdf` (mesh-direct-collision, no walls at all) tiles
+  `surround_copies` extra copies of the same heightmap around the center tile
+  (see `export_world_sdf`) so a robot that strays past the nominal
+  `size_x`/`size_y` edge lands on more terrain instead of a void. Walled
+  presets (`gazebo_demo`, `nav_maze`) don't need this.
+- Generated terrain dirs can silently go stale relative to the generator code
+  that's supposed to produce them (this happened: `gazebo_demo/42` kept a
+  pre-stiff-contact `terrain.sdf` for days). `metadata.json`'s
+  `generator_schema_version` plus `scripts/check_terrain_freshness.py` catch
+  this -- run it after any `exporters.py` change that affects physics/world
+  structure, and regenerate anything it flags.
 
 Current Nav2 tuning policy:
 
@@ -206,9 +222,23 @@ Reward intent:
 - penalize roll/pitch angular rate;
 - reward enough loaded wheels and balanced wheel load;
 - penalize vertical bounce, stuck behavior, hip target rate, and hip soft-limit approach;
+- penalize per-wheel slip (reward-only signal: true root_lin_vel_b vs no-slip
+  expected wheel speed; never added to the observation, since no equivalent
+  ground-truth-velocity sensor exists at Gazebo/hardware deployment);
 - alive bonus and fall/stability termination penalty.
 
 No reward term should ask RL to improve wheel speed, yaw tracking, path tracking, or effective track scale.
+
+Command curriculum (CommandsCfg): primitive stop/straight/turn/curve sampling,
+an optional scripted "mission" phase sequence, and an opt-in pure-pursuit mode
+(`pursuit_prob`, default 0.0) that samples random in-bounds checkpoints and
+steers toward them with a proportional heading-error law -- exercises varied,
+goal-directed driving instead of only fixed-duration primitives. Domain
+randomization (DomainRandCfg) covers friction (0.05-1.75, widened for the
+Isaac PhysX <-> Gazebo ODE/DART sim-to-sim gap), body mass, hip actuator
+stiffness/damping (±20%), and push perturbations -- all opt-in by
+profile/CLI flag except friction and hip-gain randomization, which are on by
+default.
 
 ## Evaluation Plan
 
@@ -233,6 +263,12 @@ Metrics:
 
 The route does not need strict trajectory tracking. It only needs enough low-speed travel distance to make posture statistics meaningful.
 
+Tooling: `scripts/gazebo_posture_eval.py` (fixed-command posture-only run),
+`scripts/gazebo_pursuit_eval.py` (pure-pursuit checkpoint chase, posture +
+motion/trajectory stats, reads `/ground_truth_odom` for steering and
+measurement -- see Hard Rules), `scripts/gazebo_eval_compare.py` (diffs two
+summary.json runs, e.g. RL on/off, into a metric-by-metric table).
+
 ## Development Rings
 
 1. v3 model smoke: xacro, spawn, stable neutral posture.
@@ -242,7 +278,15 @@ The route does not need strict trajectory tracking. It only needs enough low-spe
    manual map-building smoke tests.
 4. Posture eval baseline: neutral/no-RL vs scripted posture on flat and mild terrain.
 5. 6D RL smoke: Isaac reset, train short run, export actor, load in Gazebo.
+   **Done 2026-06-19**: 200-iter PPO run (`--command-profile stage0
+   --pursuit-prob 0.3`) completed in 190s, exported to a 50D/6D-compatible
+   `.npz`, loaded in `posture_policy_node` without error.
 6. RL posture acceptance: lower roll/pitch without visible jitter or motion degradation.
+   **Done 2026-06-19**: same-seed pure-pursuit A/B in Gazebo, frozen baseline
+   vs the Ring-5 checkpoint on `rl_curriculum/42`: `max_abs_roll_rad`
+   2.63→0.19 rad, `max_abs_pitch_rad` 1.32→0.12 rad, `tilt_over_0p20_ratio`
+   0.059→0.0. Only a 200-iter proof run, not converged -- re-run with more
+   iterations/envs before treating this as a final acceptance number.
 7. Model outer-loop tuning: arm length, hip limit, wheel radius, COM, contact parameters.
 8. Terrain curriculum: increase roughness only after the previous ring passes.
 
@@ -250,5 +294,9 @@ The route does not need strict trajectory tracking. It only needs enough low-spe
 
 - Do not reintroduce RL wheel residuals without explicitly changing this plan.
 - Do not use Gazebo model truth odom as a controller, policy, SLAM, or Nav2 input.
+  `/ground_truth_odom` (`OdometryPublisher` plugin, `bridge_ground_truth_odom`
+  launch arg, default false) is the one exception: eval-script-only, used by
+  `gazebo_pursuit_eval.py` for A/B comparison steering/measurement, never
+  bridged into Nav2/AMCL/control.
 - Do not judge RL only by reward; Gazebo GUI posture and motion behavior are acceptance gates.
 - Keep Nav2/SLAM implementation standard and lightweight.

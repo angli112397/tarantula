@@ -25,6 +25,7 @@ WHEEL_JOINTS = tuple(f"wheel_{leg}_joint" for leg in LEGS)
 HIP_TARGET_LIMIT = 0.45
 NEUTRAL_HIP_TARGET = tuple(0.0 for _ in LEGS)
 
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
@@ -43,6 +44,12 @@ def quat_roll_pitch(w: float, x: float, y: float, z: float) -> tuple[float, floa
     roll = math.atan2(sinr_cosp, cosr_cosp)
     sinp = clamp(2.0 * (w * y - z * x), -1.0, 1.0)
     return roll, math.asin(sinp)
+
+
+def quat_yaw(w: float, x: float, y: float, z: float) -> float:
+    """Return yaw from a wxyz quaternion."""
+
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def projected_gravity(w: float, x: float, y: float, z: float) -> tuple[float, float, float]:

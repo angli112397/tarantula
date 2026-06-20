@@ -50,8 +50,19 @@ class MotionControlConfig:
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
     drive_scale: float = 1.1532
     yaw_track_scale: float = 0.7287
-    yaw_rate_kp: float = 0.0
-    yaw_rate_ki: float = 0.0
+    # drive_scale/yaw_track_scale were calibrated open-loop against the flat
+    # floor under world.sdf's skid-steer baseline. On a raw heightmap-mesh
+    # collision surface (e.g. generated/terrains/*/world.sdf used by the
+    # Isaac Lab terrain exporter -- mesh IS the collision, no flat floor) that
+    # same open-loop differential measured ~0.00 rad/s actual chassis yaw rate
+    # for a sustained -0.4 rad/s command (confirmed via /imu/data angular_velocity.z
+    # while holding cmd_wz constant): the wheels reach the commanded speed
+    # differential but the contact can't turn the chassis at all. Nonzero
+    # kp/ki close that loop with the already-measured yaw rate; verified on
+    # flat floor too (steady-state error drops from ~0.03 rad/s to <0.01,
+    # no oscillation) so this is a strict improvement, not a tradeoff.
+    yaw_rate_kp: float = 3.0
+    yaw_rate_ki: float = 1.0
     yaw_integral_limit: float = 0.8
     max_wheel_accel: float = 12.0
 
