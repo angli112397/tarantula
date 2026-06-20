@@ -10,12 +10,20 @@ ekf_filter_node:
     base_link_frame: base_link
     world_frame: odom
 
+    # Wheel odometry feeds translation only (x, y, vx). Its yaw/vyaw used to
+    # also feed in here, but that's derived from left/right wheel speed
+    # difference -- under wheel slip (confirmed live on mesh-contact terrain:
+    # wheels commanded a turn, chassis genuinely did not rotate per IMU/ground
+    # truth, yet wheel-odometry-derived yaw drifted to 170+ degrees) it's pure
+    # fiction with no way for the EKF to tell it apart from a real turn.
+    # Rotation comes from the IMU alone, which measures real angular motion
+    # directly and isn't fooled by slip.
     odom0: /wheel/odom
     odom0_config: [
       true,  true,  false,
-      false, false, true,
+      false, false, false,
       true,  false, false,
-      false, false, true,
+      false, false, false,
       false, false, false
     ]
     odom0_queue_size: 10

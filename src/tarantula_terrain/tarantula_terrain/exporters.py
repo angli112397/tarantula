@@ -13,7 +13,9 @@ import numpy as np
 # predate the change instead of silently running stale physics/geometry
 # (this bit us twice now: once for gazebo_demo/42's contact surface, once
 # for rl_curriculum's unsmoothed tile-edge cliffs -- see _generate_rl_curriculum).
-GENERATOR_SCHEMA_VERSION = 2
+# 3->4: export_obj now writes vt (UV) coords + an elevation colormap texture;
+# dirs generated before this have no terrain_colormap.png and render flat.
+GENERATOR_SCHEMA_VERSION = 4
 
 
 def _write_png(path: Path, height: np.ndarray) -> None:
@@ -90,9 +92,36 @@ def write_map_yaml(
     )
 
 
+# Elevation colormap for the terrain mesh's diffuse texture: dark
+# soil-brown at the lowest point through warm tan to pale sun-bleached sand
+# at the highest. Deliberately not matplotlib's "terrain"/"gist_earth" --
+# those put blue at the low end (built for real topography that bottoms out
+# at sea level), which would look like water pooling in this project's pits
+# and ditches. Stops chosen for contrast on a rock/dirt heightfield, not
+# geographic accuracy.
+_ELEVATION_COLOR_STOPS = (
+    (0.00, (0.22, 0.19, 0.15)),
+    (0.50, (0.55, 0.45, 0.32)),
+    (1.00, (0.86, 0.81, 0.69)),
+)
+
+
+def _write_elevation_colormap(path: Path, width: int = 256, height: int = 8) -> None:
+    from PIL import Image
+
+    stops_t = np.array([s[0] for s in _ELEVATION_COLOR_STOPS])
+    stops_rgb = np.array([s[1] for s in _ELEVATION_COLOR_STOPS])
+    t = np.linspace(0.0, 1.0, width)
+    row = np.stack([np.interp(t, stops_t, stops_rgb[:, c]) for c in range(3)], axis=-1)
+    row = (row * 255.0).clip(0, 255).astype(np.uint8)
+    img = np.tile(row, (height, 1, 1))
+    Image.fromarray(img, mode="RGB").save(path)
+
+
 def export_obj(out_dir: Path, height: np.ndarray, resolution: float) -> Path:
     obj_path = out_dir / "terrain.obj"
     mtl_path = out_dir / "terrain.mtl"
+    colormap_path = out_dir / "terrain_colormap.png"
     ny, nx = height.shape
     x0 = -(nx - 1) * resolution / 2.0
     y0 = -(ny - 1) * resolution / 2.0
@@ -101,11 +130,19 @@ def export_obj(out_dir: Path, height: np.ndarray, resolution: float) -> Path:
     norms = np.linalg.norm(normals, axis=2, keepdims=True)
     normals = normals / np.maximum(norms, 1e-9)
 
+    # Same min/max normalization convention as _write_png, so the mesh's
+    # color banding lines up with any height.npy preview/debug image.
+    h_lo = float(height.min())
+    h_span = max(float(height.max()) - h_lo, 1e-6)
+
+    _write_elevation_colormap(colormap_path)
+
     with mtl_path.open("w", encoding="ascii") as f:
         f.write("newmtl terrain_mat\n")
-        f.write("Ka 0.34 0.35 0.33\n")
-        f.write("Kd 0.42 0.43 0.40\n")
+        f.write("Ka 1.0 1.0 1.0\n")
+        f.write("Kd 1.0 1.0 1.0\n")
         f.write("Ks 0.05 0.05 0.05\n")
+        f.write(f"map_Kd {colormap_path.name}\n")
 
     with obj_path.open("w", encoding="ascii") as f:
         f.write("mtllib terrain.mtl\n")
@@ -117,6 +154,10 @@ def export_obj(out_dir: Path, height: np.ndarray, resolution: float) -> Path:
                 f.write(f"v {x:.6f} {y:.6f} {height[iy, ix]:.6f}\n")
         for iy in range(ny):
             for ix in range(nx):
+                u = (height[iy, ix] - h_lo) / h_span
+                f.write(f"vt {u:.6f} 0.5\n")
+        for iy in range(ny):
+            for ix in range(nx):
                 nx_, ny_, nz_ = normals[iy, ix]
                 f.write(f"vn {nx_:.6f} {ny_:.6f} {nz_:.6f}\n")
         for iy in range(ny - 1):
@@ -125,8 +166,8 @@ def export_obj(out_dir: Path, height: np.ndarray, resolution: float) -> Path:
                 v1 = v0 + 1
                 v2 = v0 + nx
                 v3 = v2 + 1
-                f.write(f"f {v0}//{v0} {v1}//{v1} {v3}//{v3}\n")
-                f.write(f"f {v0}//{v0} {v3}//{v3} {v2}//{v2}\n")
+                f.write(f"f {v0}/{v0}/{v0} {v1}/{v1}/{v1} {v3}/{v3}/{v3}\n")
+                f.write(f"f {v0}/{v0}/{v0} {v3}/{v3}/{v3} {v2}/{v2}/{v2}\n")
     return obj_path
 
 
@@ -179,10 +220,12 @@ def export_terrain_sdf(out_dir: Path, obj_path: Path, surface: SurfaceProps = DE
         <geometry>
           <mesh><uri>{mesh_uri}</uri></mesh>
         </geometry>
-        <material>
-          <ambient>0.34 0.35 0.33 1</ambient>
-          <diffuse>0.42 0.43 0.40 1</diffuse>
-        </material>
+        <!-- No <material> override here: terrain.obj's own MTL now carries
+             an elevation colormap texture (see export_obj). An SDF-level
+             <material> block on a <visual> replaces whatever material the
+             mesh file specifies, same gotcha as the GUI plugin merge issue
+             documented on _GUI_TOP_DOWN_CAMERA: it would silently flatten
+             the mesh back to one solid color. -->
       </visual>
     </link>
   </model>
@@ -247,16 +290,127 @@ def _flat_floor_model(surface: SurfaceProps = DEFAULT_SURFACE) -> str:
     </model>"""
 
 
-# Gazebo's <gui><camera> looks along the camera's local +X axis (X-forward,
-# Y-left, Z-up body frame — the same convention as <sensor type="camera">).
-# pitch=90deg rotates that axis to world -Z (straight down); yaw=90deg then
-# rotates the in-frame "up" direction to world +Y (north). The result: north
-# up, east right — the same convention map_server/RViz use for the 2D map.
+# A world that declares its own <gui> with ANY <plugin> child replaces
+# Gazebo's entire default GUI plugin set (~/.ignition/gazebo/6/gui.config)
+# instead of merging with it -- confirmed empirically: adding just a bare
+# <camera> tag silently dropped MinimalScene/CameraTracking too, so
+# /gui/follow and /gui/follow/offset (chase-cam control) disappeared along
+# with the 3D view itself. So this block re-declares the full default
+# plugin set (MinimalScene's camera_pose replaces the old bare <camera> tag).
+#
+# MinimalScene's camera_pose: Gazebo's camera looks along its local +X axis
+# (X-forward, Y-left, Z-up). pitch=90deg rotates that axis to world -Z
+# (straight down); yaw=90deg then rotates in-frame "up" to world +Y (north)
+# -- north up, east right, the same convention map_server/RViz use.
+#
+# Demo-recording chase cam: /gui/follow (StringMsg model name, e.g.
+# "tarantula") + /gui/follow/offset (Vector3d, applied in the followed
+# model's local/yaw-rotating frame -- confirmed empirically the camera
+# auto-aims at the target continuously as it moves, i.e. a true chase
+# camera, not a fixed-offset translation) -- call these once via `ign
+# service` after launch, no extra plugin or script needed. Gazebo's own
+# VideoRecorder GUI plugin was tried for capture-side automation, but its
+# /gui/record_video service never advertises on this machine, even running
+# Gazebo's own stock recording-tutorial world unmodified -- looks like an
+# environment/EGL issue, not something fixable from the SDF. Record the GUI
+# window with a normal screen recorder instead.
 _GUI_TOP_DOWN_CAMERA = """
     <gui fullscreen="0">
-      <camera name="user_camera">
-        <pose>0 0 40 0 1.5708 1.5708</pose>
-      </camera>
+      <plugin filename="MinimalScene" name="3D View">
+        <ignition-gui>
+          <title>3D View</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="string" key="state">docked</property>
+        </ignition-gui>
+        <engine>ogre2</engine>
+        <scene>scene</scene>
+        <ambient_light>0.4 0.4 0.4</ambient_light>
+        <background_color>0.8 0.8 0.8</background_color>
+        <camera_pose>0 0 40 0 1.5708 1.5708</camera_pose>
+      </plugin>
+      <plugin filename="InteractiveViewControl" name="Interactive view control">
+        <ignition-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </ignition-gui>
+      </plugin>
+      <plugin filename="CameraTracking" name="Camera Tracking">
+        <ignition-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </ignition-gui>
+      </plugin>
+      <plugin filename="GzSceneManager" name="Scene Manager">
+        <ignition-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </ignition-gui>
+      </plugin>
+      <plugin filename="SelectEntities" name="Select Entities">
+        <ignition-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </ignition-gui>
+      </plugin>
+      <plugin filename="VisualizationCapabilities" name="Visualization Capabilities">
+        <ignition-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </ignition-gui>
+      </plugin>
+      <plugin filename="WorldControl" name="World control">
+        <ignition-gui>
+          <title>World control</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="bool" key="resizable">false</property>
+          <property type="double" key="height">72</property>
+          <property type="double" key="width">121</property>
+          <property type="double" key="z">1</property>
+          <property type="string" key="state">floating</property>
+          <anchors target="3D View">
+            <line own="left" target="left"/>
+            <line own="bottom" target="bottom"/>
+          </anchors>
+        </ignition-gui>
+        <play_pause>true</play_pause>
+        <step>true</step>
+        <start_paused>false</start_paused>
+        <use_event>true</use_event>
+      </plugin>
+      <plugin filename="WorldStats" name="World stats">
+        <ignition-gui>
+          <title>World stats</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="bool" key="resizable">false</property>
+          <property type="double" key="height">110</property>
+          <property type="double" key="width">290</property>
+          <property type="double" key="z">1</property>
+          <property type="string" key="state">floating</property>
+          <anchors target="3D View">
+            <line own="right" target="right"/>
+            <line own="bottom" target="bottom"/>
+          </anchors>
+        </ignition-gui>
+        <sim_time>true</sim_time>
+        <real_time>true</real_time>
+        <real_time_factor>true</real_time_factor>
+        <iterations>true</iterations>
+      </plugin>
     </gui>
 """
 

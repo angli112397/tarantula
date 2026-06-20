@@ -22,16 +22,27 @@ The smoke test checks:
 source /home/ang/isaac_venv/bin/activate
 PYTHONPATH=src:src/tarantula_control \
 python3 src/tarantula_isaac/train_v5.py \
-  --num_envs 64 \
-  --max_iterations 400 \
+  --num_envs 128 \
+  --max_iterations 2000 \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
-  --terrain-level-min 0 \
-  --terrain-level-max 0 \
   --command-profile stage0 \
   --pursuit-prob 0.3
 ```
 
-Start with level `0:0`, then increase terrain difficulty only after Gazebo posture acceptance passes.
+The original plan here was a manually-staged curriculum: start training
+restricted to `--terrain-level-min/max 0:0` (easiest row only), then re-run
+with the range widened once Gazebo posture acceptance passed. That widening
+step never actually happened -- every run stayed pinned to the easiest 2 of
+4 difficulty rows, including by default even without passing the flags
+(`shared_heightmap_terrain.py` silently capped `max_init_terrain_level` to 1
+regardless), so training never experienced the harder terrain types. Fixed
+2026-06-20: `--terrain-level-min/max` no longer exist on `train_v5.py` --
+`suspension_env.py`'s `_reset_idx` now re-rolls a random (row, col) tile
+from the terrain's *full* difficulty range on every single reset, so every
+run already covers the whole curriculum without a manual staging step.
+(`gui_smoke.py` still accepts `--terrain-level-min/max` for restricting its
+own smoke runs to easy terrain, where predictability matters more than
+coverage.)
 
 `--pursuit-prob` opts into pure-pursuit checkpoint-chasing commands
 (`CommandsCfg.pursuit_prob`, default 0.0/off) on top of whichever

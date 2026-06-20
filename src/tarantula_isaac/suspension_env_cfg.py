@@ -109,15 +109,48 @@ class RewardsCfg:
     orientation_weight = 1.2
     orientation_sigma = 0.25
     roll_pitch_rate_weight = 0.08
-    contact_support_weight = 0.35
+    # loaded_wheels/6.0 (see suspension_env.py) is a continuous 0..1 fraction,
+    # not a threshold -- a prior version only paid out above
+    # contact_min_loaded_wheels=4, which had zero gradient between 0 and 4
+    # loaded wheels and let the policy park 1-3 wheels in the air (swinging
+    # for balance) for free as long as the other >=4 stayed planted. Weight
+    # bumped alongside the formula fix since the old 0.35 was tuned against
+    # the old (much smaller, threshold-gated) typical term value.
+    contact_support_weight = 0.45
     wheel_load_balance_weight = 0.12
     contact_force_threshold = 0.15
-    contact_min_loaded_wheels = 4
     lin_vel_z_weight = 0.5
     stuck_weight = 0.25
-    action_rate_weight = 0.03
-    hip_action_rate_weight = 0.02
-    joint_limit_weight = 0.05
+    # Was split into action_rate_weight (0.03) + hip_action_rate_weight
+    # (0.02) penalizing the *exact same* quantity twice under different
+    # names -- action_space is hip-only (6D), so "action rate" and "hip
+    # action rate" were never different things. Consolidated into one term;
+    # weight roughly doubles the old combined 0.05, per legged-locomotion RL
+    # convention (ANYmal/legged_gym-style reward sets weight action-rate
+    # penalties meaningfully against the tracking/orientation term, not as
+    # an afterthought) -- the old combined weight was ~40x smaller than
+    # orientation_weight and visibly under-suppressed flat-ground jitter.
+    hip_action_rate_weight = 0.08
+    # New: standard legged-locomotion reward term we were missing -- penalizes
+    # the *physical* hip joint velocity (rad/s, from sim state), not just the
+    # commanded action's frame-to-frame delta. action_rate only sees the
+    # network's output target; if the actuator overshoots/oscillates getting
+    # there (confirmed possible empirically via step-response testing), that
+    # physical jitter is invisible to action_rate alone.
+    joint_vel_weight = 0.01
+    # New: "default pose"/nominal-posture regularization, standard in
+    # ANYmal/legged_gym-style reward sets (pull joints toward a homing
+    # position unless the task needs otherwise). Pulls susp_joint_pos toward
+    # stand_susp_target=0 directly. This is the term that's actually missing
+    # to suppress a *slow, large-amplitude* cyclic lift (e.g. front-left +
+    # rear-left up, mid-right down, hold, then settle to flat, repeat, seen
+    # even on flat ground) -- hip_action_rate/joint_vel are frame-to-frame
+    # (rate/velocity) penalties, structurally blind to a slow deliberate
+    # sweep into a large deviation: each individual step's delta and
+    # velocity stay small even though the cumulative excursion is large.
+    # This term penalizes the absolute deviation regardless of how slowly
+    # it got there.
+    joint_pos_weight = 0.08
     alive_bonus = 0.05
     termination_penalty = 8.0
     # Reward-only, deliberately NOT an observation: true per-wheel slip needs
@@ -160,7 +193,15 @@ class TerminationsCfg:
 class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 4
-    episode_length_s = 15.0
+    # 15s, then 45s, 240s, were all short of the eval-side demo scale
+    # (gazebo_pursuit_eval.py runs typically need 180-350s to complete a
+    # 3-5 checkpoint chase). 300s covers most of that range while still
+    # resetting often enough for per-reset terrain/domain-rand draws to stay
+    # varied -- the policy is a stateless MLP with no notion of elapsed
+    # episode time, so going much longer (e.g. matching a full real
+    # deployment's duration) buys no representational benefit and only
+    # makes resets rarer.
+    episode_length_s = 300.0
     action_space = 6
     observation_space = 50  # see module docstring
     state_space = 0
@@ -186,7 +227,11 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     yaw_rate_ki = MOTION_DEFAULTS.yaw_rate_ki
     yaw_integral_limit = MOTION_DEFAULTS.yaw_integral_limit
     max_abs_wheel_omega = MOTION_DEFAULTS.max_abs_wheel_omega
-    hip_action_target_limit = 0.25   # rad, conservative active-suspension clamp
+    # rad. Real URDF hip joint limit (HIP_TARGET_LIMIT, suspension_core.py) is
+    # 0.45 -- 0.25 left a lot of unused mechanical range, making the active
+    # suspension visibly underuse its authority on rough terrain. 0.35 keeps
+    # a 0.10 rad margin below the hard physical limit.
+    hip_action_target_limit = 0.35
 
     # driving: commands provide long enough motion for posture evaluation.
     wheel_radius = WHEEL_RADIUS

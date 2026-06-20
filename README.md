@@ -270,18 +270,21 @@ Train:
 source /home/ang/isaac_venv/bin/activate
 PYTHONPATH=src:src/tarantula_control \
 python3 src/tarantula_isaac/train_v5.py \
-  --num_envs 64 \
-  --max_iterations 400 \
+  --num_envs 128 \
+  --max_iterations 2000 \
   --terrain-dir "$(pwd)/generated/terrains/rl_curriculum/42" \
-  --terrain-level-min 0 \
-  --terrain-level-max 0 \
   --command-profile stage0 \
   --pursuit-prob 0.3
 ```
 
 `--pursuit-prob` opts into pure-pursuit checkpoint-chasing commands
 (default 0.0/off); friction and hip stiffness/damping domain randomization
-are on by default (see docs/03-isaac-lab-setup.md).
+are on by default (see docs/03-isaac-lab-setup.md). Training always samples
+resets across the terrain's full difficulty range (`suspension_env.py`'s
+`_reset_idx` re-rolls a random tile every reset) -- there's no
+`--terrain-level-min/max` on this entry point anymore; an earlier version
+quietly capped every run to the easiest difficulty row, which is what this
+removed.
 
 Export:
 

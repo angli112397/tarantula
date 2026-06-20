@@ -26,7 +26,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor, Imu
-from isaaclab.utils.math import quat_rotate_inverse, sample_uniform
+from isaaclab.utils.math import quat_apply_inverse, sample_uniform
 
 from tarantula_control.control_interfaces import (
     EFFECTIVE_TRACK,
@@ -46,9 +46,9 @@ REWARD_KEYS = (
     "lin_vel_z",
     "stuck",
     "roll_pitch_rate",
-    "action_rate",
     "hip_action_rate",
-    "joint_limit",
+    "joint_vel",
+    "joint_pos",
     "slip",
     "alive",
     "termination",
@@ -293,7 +293,7 @@ class TarantulaSuspensionEnv(DirectRLEnv):
     def _wheel_force_b_normalized(self) -> torch.Tensor:
         contact_forces = self._wheel_load_sensors.data.net_forces_w_history[:, 0]  # (N, 6, 3)
         base_quat = self._robot.data.root_quat_w
-        wheel_force_b = quat_rotate_inverse(
+        wheel_force_b = quat_apply_inverse(
             base_quat.unsqueeze(1).expand(-1, contact_forces.shape[1], -1).reshape(-1, 4),
             contact_forces.reshape(-1, 3),
         ).reshape(self.num_envs, 6, 3)
@@ -387,8 +387,16 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
     def _reward_terms(self) -> dict[str, torch.Tensor]:
         roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
-        action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=-1)
-        hip_action_rate = action_rate
+        hip_action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=-1)
+        joint_vel_penalty = torch.mean(
+            torch.square(self._robot.data.joint_vel[:, self._susp_joint_ids]), dim=-1
+        )
+        joint_pos_penalty = torch.mean(
+            torch.square(
+                self._robot.data.joint_pos[:, self._susp_joint_ids] - float(self.cfg.stand_susp_target)
+            ),
+            dim=-1,
+        )
 
         ang_vel_b = self._robot.data.root_ang_vel_b
         lin_vel_b = self._robot.data.root_lin_vel_b
@@ -404,12 +412,11 @@ class TarantulaSuspensionEnv(DirectRLEnv):
 
         wheel_force_norm = torch.linalg.norm(self._wheel_force_b_normalized(), dim=-1)
         loaded_wheels = (wheel_force_norm > float(self.cfg.rewards.contact_force_threshold)).float().sum(dim=-1)
-        contact_den = max(6.0 - float(self.cfg.rewards.contact_min_loaded_wheels), 1.0)
-        contact_support = torch.clamp(
-            (loaded_wheels - float(self.cfg.rewards.contact_min_loaded_wheels)) / contact_den,
-            0.0,
-            1.0,
-        )
+        # Continuous fraction of wheels loaded, not a threshold: a prior
+        # version only paid out above contact_min_loaded_wheels, which gave
+        # zero gradient between 0 and that many loaded wheels (see
+        # RewardsCfg.contact_support_weight).
+        contact_support = loaded_wheels / 6.0
         mean_load = torch.mean(wheel_force_norm, dim=-1, keepdim=True)
         load_balance = torch.mean(torch.square(wheel_force_norm - mean_load), dim=-1)
 
@@ -419,10 +426,6 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             torch.square(torch.clamp(min_expected_vx - torch.abs(v_x), min=0.0)),
             torch.zeros_like(v_x),
         )
-
-        susp_joint_pos = self._robot.data.joint_pos[:, self._susp_joint_ids]
-        soft_limit_margin = torch.clamp(torch.abs(susp_joint_pos) - 0.52, min=0.0)
-        joint_limit_penalty = torch.sum(torch.square(soft_limit_margin), dim=-1)
 
         # Privileged-only slip penalty (see RewardsCfg.slip_weight docstring):
         # true_wz from root_ang_vel_b is sim ground truth; "expected" wheel
@@ -451,9 +454,9 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             "roll_pitch_rate": -self.cfg.rewards.roll_pitch_rate_weight * roll_pitch_rate,
             "lin_vel_z": -self.cfg.rewards.lin_vel_z_weight * torch.square(lin_vel_b[:, 2]),
             "stuck": -self.cfg.rewards.stuck_weight * stuck_penalty,
-            "action_rate": -self.cfg.rewards.action_rate_weight * action_rate,
             "hip_action_rate": -self.cfg.rewards.hip_action_rate_weight * hip_action_rate,
-            "joint_limit": -self.cfg.rewards.joint_limit_weight * joint_limit_penalty,
+            "joint_vel": -self.cfg.rewards.joint_vel_weight * joint_vel_penalty,
+            "joint_pos": -self.cfg.rewards.joint_pos_weight * joint_pos_penalty,
             "slip": -self.cfg.rewards.slip_weight * slip_penalty,
             "alive": torch.full((self.num_envs,), self.cfg.rewards.alive_bonus, device=self.device),
             "termination": -self.cfg.rewards.termination_penalty * terminated.float(),
@@ -564,6 +567,17 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._randomize_hip_actuator_gains(env_ids)
         lo, hi = self.cfg.domain_rand.push_interval_steps
         self._push_countdown[env_ids] = torch.randint(lo, hi, (len(env_ids),), device=self.device)
+
+        # Re-roll a fresh random (terrain-type, difficulty) tile per reset.
+        # self._terrain.env_origins is otherwise a per-env origin fixed once
+        # at terrain import (Isaac Lab's curriculum move_up/move_down would
+        # normally update it, but nothing in this project calls
+        # update_env_origins) -- without this, a given env respawns on the
+        # exact same tile every single episode for the entire training run.
+        num_rows, num_cols = self._terrain.terrain_origins.shape[:2]
+        random_rows = torch.randint(0, num_rows, (len(env_ids),), device=self.device)
+        random_cols = torch.randint(0, num_cols, (len(env_ids),), device=self.device)
+        self._terrain.env_origins[env_ids] = self._terrain.terrain_origins[random_rows, random_cols]
 
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]

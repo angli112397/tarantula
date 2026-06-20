@@ -103,19 +103,19 @@ def make_shared_heightmap_terrain_cfg(
     terrain_type: str = "heightmap",
 ) -> SharedHeightmapTerrainImporterCfg:
     terrain_dir = Path(terrain_dir)
-    init_level = 1
-    if min_level is not None or max_level is not None:
-        metadata = json.loads((terrain_dir / "metadata.json").read_text(encoding="utf-8"))
-        rows = int(metadata["num_rows"])
-        lo = 0 if min_level is None else max(0, int(min_level))
-        hi = rows - 1 if max_level is None else min(rows - 1, int(max_level))
-        init_level = max(0, hi - lo)
     cfg = SharedHeightmapTerrainImporterCfg(
         prim_path=prim_path,
         terrain_type=terrain_type,
         height_path=str(terrain_dir / "height.npy"),
         metadata_path=str(terrain_dir / "metadata.json"),
-        max_init_terrain_level=init_level,
+        # Only bounds Isaac Lab's torch.randint() for each env's INITIAL
+        # origin assignment at terrain construction -- TarantulaSuspensionEnv
+        # ._reset_idx re-rolls a fresh random (row, col) from min_level/
+        # max_level's full filtered range on every reset (including the
+        # very first one), so this initial assignment never survives past
+        # env construction. None lets Isaac Lab default it to the actual
+        # row count rather than a hand-picked number that doesn't matter.
+        max_init_terrain_level=None,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",

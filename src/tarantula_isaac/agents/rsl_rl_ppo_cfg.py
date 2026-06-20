@@ -3,8 +3,6 @@
 """RSL-RL PPO runner config for Tarantula active-suspension posture control.
 
 MLP (obs=50, action=6): the policy only commands bounded hip position targets.
-Hidden-layer size follows the rough-terrain locomotion PPO baseline
-[512, 256, 128].
 """
 
 from isaaclab.utils import configclass
@@ -20,13 +18,13 @@ class TarantulaSuspensionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "tarantula_suspension"
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128],
+        hidden_dims=[128, 128],
         activation="elu",
         obs_normalization=True,
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.35),
     )
     critic = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128],
+        hidden_dims=[128, 128],
         activation="elu",
         obs_normalization=True,
     )

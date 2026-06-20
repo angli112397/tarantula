@@ -44,12 +44,6 @@ parser.add_argument(
     help="Override PPO entropy coefficient.",
 )
 parser.add_argument(
-    "--action-rate-weight",
-    type=float,
-    default=None,
-    help="Override action rate penalty weight.",
-)
-parser.add_argument(
     "--policy-init-std",
     type=float,
     default=None,
@@ -65,18 +59,6 @@ parser.add_argument(
     "--terrain-dir",
     default=str(DEFAULT_TERRAIN_DIR),
     help="Generated terrain directory containing height.npy and metadata.json.",
-)
-parser.add_argument(
-    "--terrain-level-min",
-    type=int,
-    default=None,
-    help="Minimum rl_curriculum terrain row to sample for resets.",
-)
-parser.add_argument(
-    "--terrain-level-max",
-    type=int,
-    default=None,
-    help="Maximum rl_curriculum terrain row to sample for resets.",
 )
 parser.add_argument(
     "--pursuit-prob",
@@ -147,15 +129,12 @@ def main():
     if args.hip_action_target_limit is not None:
         env_cfg.hip_action_target_limit = float(args.hip_action_target_limit)
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.terrain = make_shared_heightmap_terrain_cfg(
-        args.terrain_dir,
-        min_level=args.terrain_level_min,
-        max_level=args.terrain_level_max,
-    )
+    # No min_level/max_level override: training always gets the terrain's
+    # full difficulty range (see suspension_env.py's _reset_idx, which
+    # re-rolls a random tile from that full range on every reset).
+    env_cfg.terrain = make_shared_heightmap_terrain_cfg(args.terrain_dir)
     if args.max_abs_wheel_omega is not None:
         env_cfg.max_abs_wheel_omega = float(args.max_abs_wheel_omega)
-    if args.action_rate_weight is not None:
-        env_cfg.rewards.action_rate_weight = float(args.action_rate_weight)
     if args.command_resampling_time is not None:
         env_cfg.commands.resampling_time_s = float(args.command_resampling_time)
     if args.command_profile in COMMAND_PROFILES:

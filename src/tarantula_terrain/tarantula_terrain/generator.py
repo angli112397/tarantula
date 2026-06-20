@@ -164,17 +164,23 @@ def _apply_curriculum_tile(height, x, y, rng, cfg, row, col):
     sy = cfg.tile_size_y - 0.35
     label = "flat"
 
+    # Amplitudes roughly doubled from the original curriculum: at
+    # difficulty=1.0 the old formulas topped out under 0.15m -- visually
+    # flat from a top-down camera on a 24x16m map despite being labeled the
+    # hardest tier. Steepest tiles (slope/stairs) now reach ~0.30m, about 2x
+    # WHEEL_RADIUS (0.13m): genuinely visible relief, not just a difficulty
+    # number with no corresponding height difference.
     if terrain_type == 0:
-        _add_uniform_roughness(height, x, y, rng, cx, cy, sx, sy, 0.012 + 0.035 * difficulty, 0.35)
+        _add_uniform_roughness(height, x, y, rng, cx, cy, sx, sy, 0.015 + 0.075 * difficulty, 0.35)
         label = "random_uniform"
     elif terrain_type == 1:
-        _add_wave(height, x, y, cx, cy, sx, sy, 0.025 + 0.050 * difficulty, 0.85 - 0.25 * difficulty, yaw=0.0)
+        _add_wave(height, x, y, cx, cy, sx, sy, 0.030 + 0.110 * difficulty, 0.85 - 0.25 * difficulty, yaw=0.0)
         label = "wave"
     elif terrain_type == 2:
-        _add_slope(height, x, y, cx, cy, sx, sy, 0.040 + 0.110 * difficulty, axis="x")
+        _add_slope(height, x, y, cx, cy, sx, sy, 0.060 + 0.240 * difficulty, axis="x")
         label = "pyramid_slope_proxy"
     elif terrain_type == 3:
-        _add_steps(height, x, y, cx, cy, sx, sy, 0.035 + 0.090 * difficulty, 4 + row, axis="x")
+        _add_steps(height, x, y, cx, cy, sx, sy, 0.050 + 0.200 * difficulty, 4 + row, axis="x")
         label = "stairs"
     elif terrain_type == 4:
         _add_random_blocks(
@@ -187,18 +193,18 @@ def _apply_curriculum_tile(height, x, y, rng, cfg, row, col):
             sx,
             sy,
             18 + row * 8,
-            0.015,
-            0.040 + 0.080 * difficulty,
+            0.020,
+            0.060 + 0.180 * difficulty,
             0.14,
             0.42,
         )
         label = "discrete_obstacles"
     else:
         if difficulty < 0.5:
-            _add_pit_or_gap(height, x, y, cx, cy, 0.25 + 0.25 * difficulty, sy * 0.7, 0.025 + 0.055 * difficulty)
+            _add_pit_or_gap(height, x, y, cx, cy, 0.25 + 0.25 * difficulty, sy * 0.7, 0.040 + 0.090 * difficulty)
             label = "gap"
         else:
-            _add_pit_or_gap(height, x, y, cx, cy, sx * 0.55, sy * 0.55, 0.050 + 0.060 * difficulty)
+            _add_pit_or_gap(height, x, y, cx, cy, sx * 0.55, sy * 0.55, 0.090 + 0.110 * difficulty)
             label = "pit"
 
     _clear_platform(height, x, y, cx, cy, cfg.platform_size)
@@ -237,8 +243,10 @@ def _generate_rl_curriculum(cfg: TerrainCfg, rng, x, y):
     # not an intended difficulty step, a generation artifact a 0.13m-radius
     # wheel can get physically wedged against). _generate_gazebo_demo already
     # does this; curriculum tiles have larger feature amplitudes at high
-    # difficulty so use more passes.
-    height = _soften_edges(height, passes=3)
+    # difficulty so use more passes -- bumped 3->8 alongside the 2025-06-20
+    # amplitude increase (slope/stairs maxing near 0.30m now vs 0.15m) to
+    # keep the same proportional smoothing strength at the larger scale.
+    height = _soften_edges(height, passes=8)
     return height, labels, origins
 
 

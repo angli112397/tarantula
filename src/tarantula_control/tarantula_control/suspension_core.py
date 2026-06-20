@@ -56,7 +56,7 @@ def projected_gravity(w: float, x: float, y: float, z: float) -> tuple[float, fl
     """Project world gravity ``[0, 0, -1]`` into the body frame.
 
     This is algebraically equivalent to Isaac Lab's
-    ``quat_rotate_inverse(quat_w, [0, 0, -1])`` for wxyz quaternions.
+    ``quat_apply_inverse(quat_w, [0, 0, -1])`` for wxyz quaternions.
     """
 
     gx = 2.0 * w * y - 2.0 * x * z

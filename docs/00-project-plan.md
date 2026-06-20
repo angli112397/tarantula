@@ -102,12 +102,20 @@ Gazebo world policy:
 - `world_mesh_contact.sdf` is an explicit A/B test world. It removes the flat
   floor and lets wheels contact the height mesh directly (same
   `exporters.SurfaceProps`/`DEFAULT_SURFACE` stiff-contact tuning every world
-  uses). As of 2026-06-20 this contact mode is calibrated and works (see
-  `motion_control.py`'s `MotionControlConfig` docstring: stiff ODE contact
-  *and* closed-loop `yaw_rate_kp`/`yaw_rate_ki` are both required, neither
-  alone is enough) -- migrating the Nav2 demo to it is a deliberate,
-  not-yet-done follow-up (would need AMCL/SLAM/costmap/DWB revalidation on the
-  new contact surface), not a blocked/uncalibrated path anymore.
+  uses). As of 2026-06-20 this contact mode is calibrated for open-field
+  pursuit (see `motion_control.py`'s `MotionControlConfig` docstring: stiff
+  ODE contact *and* closed-loop `yaw_rate_kp`/`yaw_rate_ki` are both
+  required) but migrating the Nav2 demo to it is still **not done** --
+  attempted the same day and found two more open issues specific to small,
+  sustained DWB-style turn commands (not the larger pursuit-style commands
+  already validated): (1) the closed-loop yaw correction takes 7-10s to
+  respond to a small sustained wz like DWB issues, confirmed via ground-truth
+  odometry, and overshoots once it does; (2) `/odometry/filtered`'s EKF-fused
+  yaw can diverge sharply from ground truth under wheel slip -- excluding
+  wheel-odometry's yaw/vyaw contribution in `ekf.yaml` (kept, it's correct
+  regardless) did not fully resolve this, so the remaining contamination
+  source is still unidentified. Deliberately paused here, not abandoned --
+  priority shifted back to RL policy quality per the same day's decision.
 - `rl_curriculum`'s `world.sdf` (mesh-direct-collision, no walls at all) tiles
   `surround_copies` extra copies of the same heightmap around the center tile
   (see `export_world_sdf`) so a robot that strays past the nominal

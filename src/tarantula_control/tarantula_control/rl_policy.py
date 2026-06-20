@@ -37,8 +37,10 @@ class RLPosturePolicy:
         self.obs_dim = int(self.layers[0][0].shape[1])
         self.action_dim = int(self.layers[-1][0].shape[0])
         # Fallback only fires if a checkpoint was exported without embedding
-        # this value -- 0.25 matches TarantulaSuspensionEnvCfg's current
-        # training default, not an arbitrary guess.
+        # this value -- 0.25 matches TarantulaSuspensionEnvCfg's training
+        # default as of the checkpoints that predate this field (current
+        # default is 0.35; any checkpoint trained since this field existed
+        # always embeds its own real value, so this never overrides those).
         self.hip_action_target_limit = (
             float(npz["hip_action_target_limit"][0]) if "hip_action_target_limit" in npz else 0.25
         )
