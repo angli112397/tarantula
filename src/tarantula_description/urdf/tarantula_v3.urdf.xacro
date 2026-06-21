@@ -14,11 +14,26 @@
       </sensor>
     </gazebo>
     <gazebo reference="wheel_${prefix}_link">
-      <mu1>1.35</mu1>
-      <mu2>0.45</mu2>
-      <fdir1>1 0 0</fdir1>
+      <!-- Isotropic on purpose: anisotropic mu1/mu2 needed fdir1 pinned to
+           arm_${prefix}_link (the wheel's non-spinning parent) to mean
+           "rolling direction" consistently, but this world runs on dartsim
+           (no "ode" plugin exists on this install, see tarantula_terrain
+           exporters.py's physics-type comment) and gz:expressed_in on a
+           <gazebo> URDF-extension fdir1 is a confirmed-unfixed upstream gap
+           (gazebosim/sdformat#1300, "fdir in URDF"): the attribute never
+           survives URDF->SDF conversion, so fdir1 was silently locked to
+           world +X regardless of chassis heading the entire time, causing
+           skating once the robot turned away from spawn heading. Isaac Lab
+           (suspension_env.py's _randomize_friction) is isotropic too,
+           since PhysX materials have no fdir1-equivalent at all, so this
+           also removes a standing Isaac/Gazebo mismatch rather than adding
+           one. 0.9 is the mean of the old mu1/mu2 (1.35, 0.45), which also
+           lands near the middle of Isaac's friction_range=(0.05, 1.75)
+           domain-randomization band. -->
+      <mu1>0.9</mu1>
+      <mu2>0.9</mu2>
       <slip1>0.0</slip1>
-      <slip2>0.08</slip2>
+      <slip2>0.0</slip2>
       <kp>1000000.0</kp>
       <kd>140.0</kd>
     </gazebo>

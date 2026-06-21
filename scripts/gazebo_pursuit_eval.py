@@ -2,11 +2,20 @@
 """Gazebo pure-pursuit evaluator: compare non-RL vs RL active suspension under
 the same checkpoint-chasing drive, not just a fixed crawl.
 
-Steers with the identical proportional heading-error law
+Steers with the same proportional heading-error law
 TarantulaSuspensionEnv._update_pursuit_commands uses in Isaac Lab training
 (see suspension_env.py / suspension_env_cfg.py CommandsCfg.pursuit_heading_gain
 docstring for why a plain proportional law on the full signed angle is used
-instead of the textbook curvature formula). Steering reads /ground_truth_odom
+instead of the textbook curvature formula), plus one deliberate addition
+Isaac's trainer does not have: --rotate-to-heading-threshold, mirroring Nav2
+regulated-pure-pursuit's use_rotate_to_heading (drop cmd_vx to 0 and rotate in
+place above a heading-error threshold, instead of always blending forward
+drive with a turn). Added here, not in Isaac, because this rover's skid-steer
+yaw authority on Gazebo's terrain mesh is much weaker than in Isaac/PhysX (a
+known, currently-unresolved dartsim/gz-physics5 limitation -- see
+motion_control.py's MotionControlConfig docstring), so blending forward speed
+into a turn here leaves too little of that authority to actually rotate;
+Isaac has no such deficiency to work around. Steering reads /ground_truth_odom
 (Gazebo's OdometryPublisher plugin, bridge_ground_truth_odom:=true on
 sim.launch.py) rather than /odometry/filtered: this is a controlled A/B
 comparison tool whose job is to isolate the suspension-policy effect, not to
@@ -23,11 +32,13 @@ reachable in a straight-ish line. Do not run it against nav_maze's worlds;
 pure pursuit has no path planner and will drive into the maze walls.
 
 Skid-steer turning on a direct-mesh-collision world (no flat floor) needs
-BOTH halves of the fix in motion_control.py's MotionControlConfig docstring
-(stiff ODE contact via exporters.SurfaceProps, and closed-loop
-yaw_rate_kp/ki) -- if a terrain dir predates either, regenerate it
-(scripts/check_terrain_freshness.py flags this) rather than re-debugging
-"it won't turn" from scratch.
+all three of: stiff contact via exporters.SurfaceProps, closed-loop
+yaw_rate_kp/ki (see motion_control.py's MotionControlConfig docstring), and
+isotropic wheel friction (tarantula_v3.urdf.xacro -- anisotropic mu1/mu2
+needed a direction-frame attribute that never survives this project's
+URDF->SDF conversion under dartsim, see that file's comment) -- if a terrain
+dir predates the contact/yaw fix, regenerate it (scripts/check_terrain_freshness.py
+flags this) rather than re-debugging "it won't turn" from scratch.
 """
 
 from __future__ import annotations
@@ -201,6 +212,16 @@ def main() -> int:
     parser.add_argument("--cmd-vx", type=float, default=0.20)
     parser.add_argument("--max-cmd-wz", type=float, default=0.4)
     parser.add_argument("--heading-gain", type=float, default=DEFAULT_HEADING_GAIN)
+    parser.add_argument("--rotate-to-heading-threshold", type=float, default=0.5,
+                         help="rad. Nav2 regulated-pure-pursuit practice (use_rotate_to_heading, "
+                              "'recommended on for all robot types that can rotate in place'): "
+                              "above this |heading_error|, drop cmd_vx to 0 and rotate in place "
+                              "instead of blending forward drive with a turn. Matters more than "
+                              "usual here -- this rover's skid-steer yaw authority on the terrain "
+                              "mesh is weak, and asking it to also hold forward speed while turning "
+                              "leaves even less of that authority to actually rotate, observed as "
+                              "the robot stalling mid-turn rather than completing it. Set <=0 to "
+                              "disable and always blend (the old behavior).")
     parser.add_argument("--arrival-radius", type=float, default=1.0,
                          help="Matches CommandsCfg.pursuit_arrival_radius's training default. "
                               "Kept well outside bearing-only pursuit's ill-conditioned zone near "
@@ -258,7 +279,10 @@ def main() -> int:
             target = checkpoints[checkpoint_index]
             heading_error, distance = pursuit_heading_error(node.pos_x, node.pos_y, node.yaw, target)
             cmd_wz = max(-args.max_cmd_wz, min(args.max_cmd_wz, args.heading_gain * heading_error))
-            cmd_vx = args.cmd_vx
+            if args.rotate_to_heading_threshold > 0.0 and abs(heading_error) > args.rotate_to_heading_threshold:
+                cmd_vx = 0.0
+            else:
+                cmd_vx = args.cmd_vx
             node.publish_cmd(cmd_vx, cmd_wz)
             rows.append(collect_sample(node, elapsed - args.settle, cmd_vx, cmd_wz, checkpoint_index,
                                         distance, distance_traveled))

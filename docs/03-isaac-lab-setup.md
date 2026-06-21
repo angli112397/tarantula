@@ -52,7 +52,7 @@ mission mix unchanged.
 ## Domain randomization
 
 `DomainRandCfg` (`suspension_env_cfg.py`) widens training to cover the Isaac
-PhysX <-> Gazebo ODE/DART sim-to-sim gap: `friction_range=(0.05,1.75)` and
+PhysX <-> Gazebo DART sim-to-sim gap: `friction_range=(0.05,1.75)` and
 `hip_stiffness_scale_range`/`hip_damping_scale_range=(0.8,1.2)` are on by
 default (no flag needed); body mass and push perturbations stay opt-in by
 `--command-profile` (e.g. `stage0` enables push DR) since they're more likely

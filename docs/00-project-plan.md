@@ -104,8 +104,10 @@ Gazebo world policy:
   `exporters.SurfaceProps`/`DEFAULT_SURFACE` stiff-contact tuning every world
   uses). As of 2026-06-20 this contact mode is calibrated for open-field
   pursuit (see `motion_control.py`'s `MotionControlConfig` docstring: stiff
-  ODE contact *and* closed-loop `yaw_rate_kp`/`yaw_rate_ki` are both
-  required) but migrating the Nav2 demo to it is still **not done** --
+  contact tuning, closed-loop `yaw_rate_kp`/`yaw_rate_ki`, *and* isotropic
+  wheel friction -- this world actually runs on dartsim, not ODE, see
+  `exporters.py`'s `_world_sdf` physics-type comment -- are all required)
+  but migrating the Nav2 demo to it is still **not done** --
   attempted the same day and found two more open issues specific to small,
   sustained DWB-style turn commands (not the larger pursuit-style commands
   already validated): (1) the closed-loop yaw correction takes 7-10s to
@@ -243,7 +245,7 @@ an optional scripted "mission" phase sequence, and an opt-in pure-pursuit mode
 steers toward them with a proportional heading-error law -- exercises varied,
 goal-directed driving instead of only fixed-duration primitives. Domain
 randomization (DomainRandCfg) covers friction (0.05-1.75, widened for the
-Isaac PhysX <-> Gazebo ODE/DART sim-to-sim gap), body mass, hip actuator
+Isaac PhysX <-> Gazebo DART sim-to-sim gap), body mass, hip actuator
 stiffness/damping (±20%), and push perturbations -- all opt-in by
 profile/CLI flag except friction and hip-gain randomization, which are on by
 default.

@@ -27,7 +27,23 @@ import numpy as np
 # but-still-20-30deg blend ring around world (0,0); the deployable fix is
 # spawning on a tile's own flat _clear_platform square instead (sim.launch.py
 # spawn_x/spawn_y), not anything encoded in the heightmap itself.
-GENERATOR_SCHEMA_VERSION = 6
+# 6->7: export_obj now alternates each cell's diagonal split direction
+# (zigzag) instead of always cutting the same way -- the old uniform
+# direction bakes a fixed-orientation ridge into the collision surface
+# across the whole terrain (see gazebo-classic#2838/dart#1069 on OGRE vs
+# ODE/DART triangulation conventions). Investigated as a candidate cause of
+# this project's direction-dependent traction symptoms; empirically it did
+# not fix the underlying skid-steer-on-mesh issue (a deeper, still-open
+# dartsim/gz-physics5 limitation -- primitives turn correctly, mesh/
+# heightmap collision does not, regardless of triangulation), but the old
+# uniform-direction triangulation was a real bug independent of that and is
+# worth keeping fixed. Dirs generated before this have the old, biased
+# triangulation.
+# 7->8: DEFAULT_SURFACE.kd 10.0->140.0, matching tarantula_v3.urdf.xacro's
+# wheel <kd> -- found mismatched with no comment justifying a deliberate
+# difference during a full contact-parameter audit. Dirs generated before
+# this have the unmatched terrain-side kd.
+GENERATOR_SCHEMA_VERSION = 8
 
 
 def _write_png(path: Path, height: np.ndarray) -> None:
@@ -178,19 +194,40 @@ def export_obj(out_dir: Path, height: np.ndarray, resolution: float) -> Path:
                 v1 = v0 + 1
                 v2 = v0 + nx
                 v3 = v2 + 1
-                f.write(f"f {v0}/{v0}/{v0} {v1}/{v1}/{v1} {v3}/{v3}/{v3}\n")
-                f.write(f"f {v0}/{v0}/{v0} {v3}/{v3}/{v3} {v2}/{v2}/{v2}\n")
+                # Zigzag (alternate which corner-pair the diagonal connects,
+                # by cell parity) instead of always splitting v0-v3: ODE/DART
+                # without bullet's collision detector always uses the same
+                # diagonal direction for every cell, baking a fixed-direction
+                # ridge into the collision surface across the whole terrain
+                # (confirmed via gazebo-classic#2838/dart#1069 -- matching
+                # OGRE's own zigzag convention needs this explicitly, DART
+                # only does it automatically when paired with bullet's
+                # collision detector). A uniform diagonal direction is a
+                # plausible contributor to this project's direction-dependent
+                # traction symptoms on mesh collision.
+                if (ix + iy) % 2 == 0:
+                    f.write(f"f {v0}/{v0}/{v0} {v1}/{v1}/{v1} {v3}/{v3}/{v3}\n")
+                    f.write(f"f {v0}/{v0}/{v0} {v3}/{v3}/{v3} {v2}/{v2}/{v2}\n")
+                else:
+                    f.write(f"f {v0}/{v0}/{v0} {v1}/{v1}/{v1} {v2}/{v2}/{v2}\n")
+                    f.write(f"f {v1}/{v1}/{v1} {v3}/{v3}/{v3} {v2}/{v2}/{v2}\n")
     return obj_path
 
 
 @dataclass(frozen=True)
 class SurfaceProps:
-    """ODE friction/contact tuning shared by every collision geometry we export.
+    """Friction/contact tuning shared by every collision geometry we export.
 
-    Without slip/contact damping, Gazebo's ODE defaults leave thin boxes and
-    meshes essentially frictionless (skid-steer wheels can't generate a yaw
-    moment), so this is threaded through every exporter instead of being a
-    one-off block on a single geometry type.
+    These are isotropic (mu == mu2, no fdir1), so the SDF <ode> element
+    name is just SDFormat's generic tag namespace for contact-compliance
+    parameters, not a statement about which engine reads them -- the world
+    actually runs on dartsim (see _world_sdf's physics type comment), and
+    an isotropic friction value has no direction to get wrong, so it reads
+    correctly under dartsim with no extra attributes needed. Without
+    slip/contact damping, defaults leave thin boxes and meshes essentially
+    frictionless (skid-steer wheels can't generate a yaw moment), so this
+    is threaded through every exporter instead of being a one-off block on
+    a single geometry type.
     """
 
     mu: float = 1.50
@@ -198,7 +235,12 @@ class SurfaceProps:
     slip1: float = 0.001
     slip2: float = 0.001
     kp: float = 1_000_000.0
-    kd: float = 10.0
+    # Matches tarantula_v3.urdf.xacro's wheel <kd> -- found mismatched at
+    # 10.0 vs the wheel's 140.0 during a full-codebase contact-parameter
+    # audit, no comment on either side explaining a deliberate difference.
+    # Unified to the wheel's value since it looks like the one actually
+    # tuned (140.0 isn't a generic placeholder the way 10.0 is).
+    kd: float = 140.0
     max_vel: float = 0.2
     min_depth: float = 0.001
 
@@ -442,7 +484,17 @@ def _world_sdf(name: str, body: str, *, include_gui_camera: bool = True) -> str:
     <plugin filename="gz-sim-forcetorque-system" name="ignition::gazebo::systems::ForceTorque"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
 {gui_block}
-    <physics type="ode">
+    <!-- "ode" was never real: no libignition-physics-*-ode-plugin exists on
+         this install (only bullet/dartsim/tpe do), so gz-sim's Physics
+         system silently fell back to its own default (dartsim) the entire
+         time this said "ode", confirmed via -v 4 startup log ("Loaded
+         [ignition::physics::dartsim::Plugin]"). Declaring it explicitly so
+         the SDF says what's actually running, and because correctly fixing
+         the wheel's anisotropic friction (tarantula_v3.urdf.xacro's fdir1)
+         requires knowing for certain which engine: DART's directional
+         friction needs the gz:expressed_in attribute, which has no ODE
+         equivalent. -->
+    <physics type="dartsim">
       <max_step_size>0.001</max_step_size>
       <real_time_update_rate>1000</real_time_update_rate>
     </physics>

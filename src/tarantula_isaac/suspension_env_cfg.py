@@ -85,7 +85,7 @@ class DomainRandCfg:
     contact explosions during GUI smoke, so push DR defaults to off.
 
     friction_range/hip_stiffness_scale_range/hip_damping_scale_range are
-    widened/added specifically for the Isaac Lab (PhysX) -> Gazebo (ODE/DART)
+    widened/added specifically for the Isaac Lab (PhysX) -> Gazebo (DART)
     sim-to-sim gap: the two engines solve contact and joint drives with
     different solvers, so a friction or PD-gain number tuned to "feel right"
     in one has no guaranteed equivalent behavior in the other. Published

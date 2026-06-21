@@ -59,7 +59,7 @@ class MotionControlConfig:
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
     drive_scale: float = 1.1532
     yaw_track_scale: float = 0.7287
-    # This Gazebo/ODE value is deliberately NOT what Isaac Lab trains with --
+    # This Gazebo/DART value is deliberately NOT what Isaac Lab trains with --
     # suspension_env_cfg.py's TarantulaSuspensionEnvCfg.yaw_track_scale=1.6
     # is a separate, intentionally larger constant compensating for PhysX's
     # different skid-steer curve response. Don't "fix" one to match the
@@ -189,12 +189,24 @@ class SkidSteerMotionController:
         corrected = []
         for leg, omega in zip(LEGS, wheel):
             semantic_sign = 1.0 if leg in RIGHT_LEGS else -1.0
-            corrected.append(
-                clamp_abs(
-                    omega + semantic_sign * yaw_correction,
-                    self.config.max_abs_wheel_omega,
-                )
-            )
+            raw = clamp_abs(omega + semantic_sign * yaw_correction, self.config.max_abs_wheel_omega)
+            # Never let the correction flip a wheel past zero into the
+            # opposite sense from the open-loop differential's own intent --
+            # large kp*yaw_error + ki*integral (e.g. during a slow-to-settle
+            # turn) can otherwise exceed the wheel's own base omega and drive
+            # it backward relative to what skid_steer_wheel_speeds() asked
+            # for, fighting the very turn it's meant to help (measured: with
+            # yaw_rate_kp=3.0 and yaw_integral_limit=0.8, ~0.3 rad/s of
+            # sustained yaw error already produces ~1.7 rad/s of correction,
+            # comfortably enough to reverse a wheel whose open-loop magnitude
+            # is smaller than that). Clamping to 0 on the far side preserves
+            # "can be slowed to a stop" without "can be driven backward by
+            # the correction term alone".
+            if omega > 1.0e-6:
+                raw = max(raw, 0.0)
+            elif omega < -1.0e-6:
+                raw = min(raw, 0.0)
+            corrected.append(raw)
         return corrected
 
     def filtered_wheel_targets(
