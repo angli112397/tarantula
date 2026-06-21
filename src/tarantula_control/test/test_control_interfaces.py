@@ -118,8 +118,9 @@ class ControlInterfacesTest(unittest.TestCase):
         self.assertAlmostEqual(wheel[0], expected_left, places=9)   # fl
         self.assertAlmostEqual(wheel[1], expected_right, places=9)  # fr
 
-    def test_posture_observation_layout_is_50d(self):
+    def test_posture_observation_layout_is_56d(self):
         zeros = {leg: 0.0 for leg in LEGS}
+        ones = {leg: 1.0 for leg in LEGS}
         zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
         command = SkidSteerMotionController().limit_command(0.2, 0.1)
         obs = build_posture_observation(
@@ -129,6 +130,7 @@ class ControlInterfacesTest(unittest.TestCase):
             susp_joint_vel=zeros,
             wheel_joint_vel=zeros,
             wheel_force=zero_forces,
+            contact_uptime=ones,
             command=command,
             prev_action=np.zeros(POSTURE_ACTION_DIM, dtype=np.float32),
         )
@@ -136,6 +138,7 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_posture_observation_rejects_old_three_dim_prev_action(self):
         zeros = {leg: 0.0 for leg in LEGS}
+        ones = {leg: 1.0 for leg in LEGS}
         zero_forces = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
         command = SkidSteerMotionController().limit_command(0.2, 0.1)
 
@@ -147,6 +150,7 @@ class ControlInterfacesTest(unittest.TestCase):
                 susp_joint_vel=zeros,
                 wheel_joint_vel=zeros,
                 wheel_force=zero_forces,
+                contact_uptime=ones,
                 command=command,
                 prev_action=np.zeros(3, dtype=np.float32),
             )

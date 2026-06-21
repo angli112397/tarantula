@@ -125,7 +125,7 @@ def main():
 
     env_cfg = TarantulaSuspensionEnvCfg()
     env_cfg.action_space = 6
-    env_cfg.observation_space = 50
+    env_cfg.observation_space = 56
     if args.hip_action_target_limit is not None:
         env_cfg.hip_action_target_limit = float(args.hip_action_target_limit)
     env_cfg.scene.num_envs = args.num_envs

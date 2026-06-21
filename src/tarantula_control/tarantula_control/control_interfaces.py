@@ -1,8 +1,9 @@
 """Shared control-interface helpers for Gazebo deployment nodes."""
 
+import math
 from dataclasses import dataclass
 
-from .suspension_core import LEGS
+from .suspension_core import LEGS, clamp
 from .vehicle_geometry import VEHICLE_GEOMETRY
 
 
@@ -48,10 +49,6 @@ WHEEL_DIRECTION = {
 }
 
 
-def clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(upper, value))
-
-
 def clamp_abs(value: float, limit: float) -> float:
     limit = abs(limit)
     return clamp(value, -limit, limit)
@@ -59,6 +56,59 @@ def clamp_abs(value: float, limit: float) -> float:
 
 def wheel_force_normalized(force_xyz: tuple[float, float, float]) -> tuple[float, float, float]:
     return tuple(clamp(component / NOMINAL_WHEEL_LOAD, -3.0, 3.0) for component in force_xyz)
+
+
+def ema_wheel_force(
+    previous: dict[str, tuple[float, float, float]],
+    current: dict[str, tuple[float, float, float]],
+    alpha: float,
+) -> dict[str, tuple[float, float, float]]:
+    """One exponential-moving-average update of raw per-leg F/T force (N).
+
+    Run once per control tick, on the raw (pre-normalize, pre-clamp) reading
+    -- matches suspension_env.py's Isaac-side filter exactly, which also
+    filters before normalizing/clamping. Filtering after the +-3.0 clamp
+    instead would make the two pipelines diverge on the rare reading that
+    saturates the clamp.
+    """
+
+    return {
+        leg: tuple(alpha * c + (1.0 - alpha) * p for p, c in zip(previous[leg], current[leg]))
+        for leg in LEGS
+    }
+
+
+def contact_loaded(force_xyz: tuple[float, float, float], threshold: float) -> float:
+    """1.0 if this wheel's normalized F/T magnitude exceeds `threshold`, else
+    0.0 -- the same instantaneous loaded/unloaded judgement
+    suspension_env.py's contact_now uses (same MotionControlConfig.
+    contact_force_threshold), on the raw (unfiltered) reading."""
+
+    fx, fy, fz = wheel_force_normalized(force_xyz)
+    return 1.0 if math.sqrt(fx * fx + fy * fy + fz * fz) > threshold else 0.0
+
+
+def ema_contact_uptime(
+    previous: dict[str, float],
+    wheel_force: dict[str, tuple[float, float, float]],
+    threshold: float,
+    alpha: float,
+) -> dict[str, float]:
+    """One EMA update of per-leg contact "uptime" (see MotionControlConfig.
+    contact_uptime_alpha) -- decays toward 0.0 while a leg is unloaded,
+    climbs back toward 1.0 while loaded. Run once per control tick on the
+    raw (unfiltered) force reading, mirroring suspension_env.py's
+    _contact_uptime_ema exactly: this is the deployable half of a feature
+    that's also fed into the policy's observation (POSTURE_OBSERVATION_LAYOUT
+    in motion_control.py), not just the reward -- a memoryless policy can't
+    otherwise tell "held contact for a while" apart from "just touched down"
+    from a single instantaneous reading.
+    """
+
+    return {
+        leg: alpha * contact_loaded(wheel_force[leg], threshold) + (1.0 - alpha) * previous[leg]
+        for leg in LEGS
+    }
 
 
 def mean_wheel_forward_velocity(wheel_vel: dict[str, float]) -> float:

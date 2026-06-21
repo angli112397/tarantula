@@ -11,11 +11,23 @@ import numpy as np
 # logic). Embedded in metadata.json by generator.py/nav_maze.py so
 # scripts/check_terrain_freshness.py can flag already-generated dirs that
 # predate the change instead of silently running stale physics/geometry
-# (this bit us twice now: once for gazebo_demo/42's contact surface, once
-# for rl_curriculum's unsmoothed tile-edge cliffs -- see _generate_rl_curriculum).
+# (this bit us four times now: once for gazebo_demo/42's contact surface,
+# once for rl_curriculum's unsmoothed inner tile-edge cliffs, once for its
+# unflattened outer-edge surround_copies seam, once for the world-origin
+# spawn flattening that couldn't fully smooth a 4-tile junction -- see
+# _generate_rl_curriculum, generator._taper_outer_edge, and
+# generate_heightmap's comment on removing _clear_spawn).
 # 3->4: export_obj now writes vt (UV) coords + an elevation colormap texture;
 # dirs generated before this have no terrain_colormap.png and render flat.
-GENERATOR_SCHEMA_VERSION = 4
+# 4->5: generator.py tapers height to 0 within edge_taper_band of the outer
+# rectangle so surround_copies' repeat seam is flat on both sides; dirs
+# generated before this can have a multi-cm cliff exactly at that seam.
+# 5->6: removed _clear_spawn's global-origin flattening entirely (see
+# generate_heightmap) -- dirs generated before this still have the smoothed-
+# but-still-20-30deg blend ring around world (0,0); the deployable fix is
+# spawning on a tile's own flat _clear_platform square instead (sim.launch.py
+# spawn_x/spawn_y), not anything encoded in the heightmap itself.
+GENERATOR_SCHEMA_VERSION = 6
 
 
 def _write_png(path: Path, height: np.ndarray) -> None:

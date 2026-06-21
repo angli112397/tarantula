@@ -1,9 +1,10 @@
 """Gazebo-deployable active-suspension PPO actor forward pass.
 
-The deployable actor is fixed at 50D observation / 6D action:
+The deployable actor is fixed at 56D observation / 6D action:
 
-- obs[0:44]: IMU, hip state, wheel velocity, wheel F/T, and limited cmd_vx/cmd_wz
-- obs[44:50]: previous six hip actions
+- obs[0:50]: IMU, hip state, wheel velocity, wheel F/T, per-leg contact
+  uptime (~1s EMA), and limited cmd_vx/cmd_wz
+- obs[50:56]: previous six hip actions
 - action[0:6]: direct bounded hip position targets in LEGS order
 """
 
@@ -46,10 +47,10 @@ class RLPosturePolicy:
         )
         if self.obs_mean.shape[0] != self.obs_dim:
             raise ValueError(f"obs normalizer has {self.obs_mean.shape[0]} dims, actor expects {self.obs_dim}")
-        if (self.obs_dim, self.action_dim) != (50, 6):
+        if (self.obs_dim, self.action_dim) != (56, 6):
             raise ValueError(
                 f"unsupported actor shape {self.obs_dim}D/{self.action_dim}D; "
-                "expected active-suspension 50D/6D"
+                "expected active-suspension 56D/6D"
             )
 
     def act(self, obs: np.ndarray) -> np.ndarray:

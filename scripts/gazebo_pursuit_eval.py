@@ -201,8 +201,11 @@ def main() -> int:
     parser.add_argument("--cmd-vx", type=float, default=0.20)
     parser.add_argument("--max-cmd-wz", type=float, default=0.4)
     parser.add_argument("--heading-gain", type=float, default=DEFAULT_HEADING_GAIN)
-    parser.add_argument("--arrival-radius", type=float, default=0.3,
-                         help="Matches CommandsCfg.pursuit_arrival_radius's training default.")
+    parser.add_argument("--arrival-radius", type=float, default=1.0,
+                         help="Matches CommandsCfg.pursuit_arrival_radius's training default. "
+                              "Kept well outside bearing-only pursuit's ill-conditioned zone near "
+                              "the target (heading_error = atan2(ly, lx) gets very sensitive to "
+                              "position noise as distance -> 0, and cmd_vx never slows on approach).")
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--settle", type=float, default=2.0)
     parser.add_argument("--max-duration", type=float, default=180.0, help="Safety cap in case a checkpoint is never reached.")

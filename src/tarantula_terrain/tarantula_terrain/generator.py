@@ -95,17 +95,27 @@ def _soften_edges(height, passes=2):
     return smoothed
 
 
-def _clear_spawn(height, x, y, radius, feather=0.0):
-    dist = np.sqrt(x * x + y * y)
-    if feather <= 0.0:
-        height[dist <= radius] = 0.0
+def _taper_outer_edge(height, x, y, size_x, size_y, band):
+    """Smoothstep height to 0 within `band` meters of the heightmap's outer
+    rectangle.
+
+    export_world_sdf's surround_copies repeats this exact array at adjacent
+    tile offsets so an unwalled preset has ground to drive onto past the
+    nominal boundary instead of a void. That only tiles seamlessly if the
+    array's own outer edge is flat: _soften_edges's edge-replicate padding
+    fixes a different problem (the *interior* curriculum-tile seams) and
+    explicitly does not wrap/match opposite borders, so two
+    independently-generated edges meeting at a repeat seam can disagree by
+    several cm packed into one mesh cell (measured up to ~6cm on
+    rl_curriculum/42) -- enough for a 0.13m-radius wheel to catch on, the
+    same near-vertical-wall wedging failure _generate_rl_curriculum's own
+    edge-smoothing already describes, just at the outer seam instead of an
+    inner tile boundary.
+    """
+    if band <= 0.0:
         return
-    # Smoothstep fade from 0 at the center to the unmodified terrain at
-    # radius+feather, so the cleared disk doesn't leave a hard step at its
-    # boundary -- a generic blur pass can't reliably erase that step (its
-    # strength depends on how steep the surrounding terrain happens to be),
-    # this is exact regardless.
-    t = np.clip((dist - radius) / feather, 0.0, 1.0)
+    dist = np.minimum(size_x / 2.0 - np.abs(x), size_y / 2.0 - np.abs(y))
+    t = np.clip(dist / band, 0.0, 1.0)
     height *= t * t * (3.0 - 2.0 * t)
 
 
@@ -261,7 +271,17 @@ def generate_heightmap(cfg: TerrainCfg, seed: int):
     else:
         raise ValueError(f"unsupported terrain preset: {cfg.preset}")
 
-    _clear_spawn(height, x, y, cfg.spawn_clear_radius, feather=0.5)
+    # No global-origin flattening here anymore (removed _clear_spawn): the
+    # world coordinate origin sits at a corner where up to 4 curriculum tiles
+    # meet (rl_curriculum's grid is centered on it), each potentially a
+    # different terrain_type/difficulty -- smoothstep-blending that junction
+    # down to 0 still left a 20-30deg local slope ring no radius/feather
+    # choice fully fixed (push the boundary out and it just lands on another
+    # tile-boundary discontinuity instead). The actual fix is spawning on a
+    # difficulty-0 tile's own _clear_platform square instead (see
+    # sim.launch.py's spawn_x/spawn_y, set to a row=0 tile center) -- that's
+    # a real flat platform with no neighboring-tile seam, not a blend.
+    _taper_outer_edge(height, x, y, cfg.size_x, cfg.size_y, cfg.edge_taper_band)
     height = np.clip(height, cfg.min_height, cfg.max_height).astype(np.float32)
 
     metadata = {

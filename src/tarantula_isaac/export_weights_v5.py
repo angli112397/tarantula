@@ -150,8 +150,8 @@ for layer_idx in range(len(linear_layers)):
     print(f"  mlp.{layer_idx}.bias:   {npz_data[f'mlp.{layer_idx}.bias'].shape}")
 print(f"  obs mean:     {npz_data['obs_normalizer._mean'].shape}  (expect [{obs_dim}])")
 print(f"  hip target:   {float(npz_data['hip_action_target_limit'][0])} rad")
-assert (obs_dim, action_dim) == (50, 6), (
-    f"Expected active-suspension 50D/6D actor, got {obs_dim}D/{action_dim}D"
+assert (obs_dim, action_dim) == (56, 6), (
+    f"Expected active-suspension 56D/6D actor, got {obs_dim}D/{action_dim}D"
 )
 assert npz_data["mlp.0.weight"].shape[1] == obs_dim
 assert npz_data[f"mlp.{last_layer_idx}.weight"].shape[0] == action_dim

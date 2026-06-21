@@ -17,14 +17,22 @@ class TarantulaSuspensionPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "tarantula_suspension"
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
+    # [512, 256, 128]: the legged_gym/ANYmal-convention actor/critic width for
+    # this class of task (proprioceptive obs in the tens of dims, memoryless
+    # MLP) -- e.g. Rudin et al. 2021 "Learning to Walk in Minutes" uses this
+    # exact shape for ANYmal's ~48D proprioceptive obs. Surveying related
+    # work (active-suspension rover, ANYmal blind terrain locomotion, RMA)
+    # turned up no PPO actor that benefits from going narrower than this for
+    # an obs space our size, so there's no real reason for the smaller
+    # [128, 128] we'd shrunk to.
     actor = RslRlMLPModelCfg(
-        hidden_dims=[128, 128],
+        hidden_dims=[512, 256, 128],
         activation="elu",
         obs_normalization=True,
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.35),
     )
     critic = RslRlMLPModelCfg(
-        hidden_dims=[128, 128],
+        hidden_dims=[512, 256, 128],
         activation="elu",
         obs_normalization=True,
     )

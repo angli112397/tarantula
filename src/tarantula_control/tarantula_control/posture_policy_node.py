@@ -1,6 +1,6 @@
 """Active-suspension policy node.
 
-The node loads a 50D/6D posture actor and publishes six hip position targets.
+The node loads a 56D/6D posture actor and publishes six hip position targets.
 It never publishes wheel velocity commands and never changes ``/cmd_vel``.
 """
 
@@ -15,6 +15,7 @@ from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from .control_interfaces import ema_contact_uptime, ema_wheel_force
 from .motion_control import (
     MotionControlConfig,
     POSTURE_ACTION_DIM,
@@ -30,6 +31,12 @@ class PosturePolicyNode(Node):
     def __init__(self):
         super().__init__("posture_policy_node")
         defaults = MotionControlConfig()
+        # 30 Hz must match Isaac training's control rate (decimation * sim.dt
+        # in suspension_env_cfg.py's TarantulaSuspensionEnvCfg) -- this node's
+        # wheel_force_filter_alpha EMA constant is calibrated against this
+        # rate on both sides. No shared single-source constant for the rate
+        # itself (this is a ROS timer; Isaac derives its rate from simulator
+        # timesteps instead), so if either changes, update the other by hand.
         self.declare_parameter("rate", 30.0)
         self.declare_parameter("policy_weights_npz", "")
         self.declare_parameter("cmd_vx", 0.0)
@@ -37,6 +44,9 @@ class PosturePolicyNode(Node):
         self.declare_parameter("max_abs_cmd_vx", defaults.max_abs_cmd_vx)
         self.declare_parameter("max_abs_cmd_wz", defaults.max_abs_cmd_wz)
         self.declare_parameter("force_observation_enabled", True)
+        self.declare_parameter("wheel_force_filter_alpha", defaults.wheel_force_filter_alpha)
+        self.declare_parameter("contact_force_threshold", defaults.contact_force_threshold)
+        self.declare_parameter("contact_uptime_alpha", defaults.contact_uptime_alpha)
 
         self.policy = RLPosturePolicy(str(self.get_parameter("policy_weights_npz").value))
         if self.policy.obs_dim != POSTURE_OBSERVATION_DIM or self.policy.action_dim != POSTURE_ACTION_DIM:
@@ -64,6 +74,14 @@ class PosturePolicyNode(Node):
         self.joint_vel = {leg: 0.0 for leg in LEGS}
         self.wheel_vel = {leg: 0.0 for leg in LEGS}
         self.wheel_force = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
+        self.wheel_force_filtered = {leg: (0.0, 0.0, 0.0) for leg in LEGS}
+        self.wheel_force_filter_alpha = float(self.get_parameter("wheel_force_filter_alpha").value)
+        # Optimistic init (1.0, not 0.0) -- matches suspension_env.py's
+        # _contact_uptime_ema reset convention so this doesn't read as "bad
+        # contact" for the first ~1s after the node starts.
+        self.contact_uptime_ema = {leg: 1.0 for leg in LEGS}
+        self.contact_force_threshold = float(self.get_parameter("contact_force_threshold").value)
+        self.contact_uptime_alpha = float(self.get_parameter("contact_uptime_alpha").value)
         self.prev_action = np.zeros(POSTURE_ACTION_DIM, dtype=np.float32)
         self.joint_seen = False
 
@@ -123,13 +141,26 @@ class PosturePolicyNode(Node):
         if not self.joint_seen:
             return
         command = self.motion_controller.limit_command(self.cmd_vx, self.cmd_wz)
+        # One EMA update per control tick (not per /ft_wheel/* message), on the
+        # raw reading -- matches the Isaac-side filter cadence and pre-clamp
+        # ordering exactly (see ema_wheel_force's docstring).
+        self.wheel_force_filtered = ema_wheel_force(
+            self.wheel_force_filtered, self.wheel_force, self.wheel_force_filter_alpha
+        )
+        # Separate EMA, on the raw (unfiltered) reading -- same
+        # threshold/alpha and same raw input suspension_env.py's
+        # _contact_uptime_ema uses, not the noise-filtered wheel_force above.
+        self.contact_uptime_ema = ema_contact_uptime(
+            self.contact_uptime_ema, self.wheel_force, self.contact_force_threshold, self.contact_uptime_alpha
+        )
         obs = build_posture_observation(
             projected_gravity_b=self.proj_grav,
             root_ang_vel_b=self.ang_vel,
             susp_joint_pos=self.joint_pos,
             susp_joint_vel=self.joint_vel,
             wheel_joint_vel=self.wheel_vel,
-            wheel_force=self.wheel_force,
+            wheel_force=self.wheel_force_filtered,
+            contact_uptime=self.contact_uptime_ema,
             command=command,
             prev_action=self.prev_action,
         )

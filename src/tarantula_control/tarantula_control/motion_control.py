@@ -26,7 +26,7 @@ from .control_interfaces import (
 from .suspension_core import LEGS
 
 
-POSTURE_OBSERVATION_DIM = 50
+POSTURE_OBSERVATION_DIM = 56
 POSTURE_ACTION_DIM = 6
 WHEEL_TARGET_DIM = 6
 
@@ -37,6 +37,15 @@ POSTURE_OBSERVATION_LAYOUT = (
     ("susp_joint_vel", 6, "joint_states hip/arm velocities"),
     ("wheel_joint_vel", 6, "joint_states wheel velocities"),
     ("wheel_force", 18, "wheel-end F/T force vector, normalized, LEGS order"),
+    # Per-leg EMA "contact uptime" (~1s window, contact_uptime_alpha above) --
+    # added because the contact_support/contact_uptime reward depends on
+    # this exact recursive state, and a memoryless policy/critic that never
+    # sees it can't tell "I've held solid contact for a while" apart from
+    # "I just barely touched down" from a single instantaneous F/T reading
+    # alone. Computed identically on both sides: same threshold/alpha
+    # (MotionControlConfig), same raw (unfiltered) F/T input as wheel_force
+    # above -- see control_interfaces.ema_contact_uptime.
+    ("contact_uptime", 6, "per-leg EMA contact persistence, LEGS order"),
     ("cmd_vx", 1, "limited command forward velocity"),
     ("cmd_wz", 1, "limited command yaw rate"),
     ("prev_action", 6, "previous hip target action"),
@@ -50,6 +59,11 @@ class MotionControlConfig:
     max_abs_wheel_omega: float = MAX_ABS_WHEEL_OMEGA
     drive_scale: float = 1.1532
     yaw_track_scale: float = 0.7287
+    # This Gazebo/ODE value is deliberately NOT what Isaac Lab trains with --
+    # suspension_env_cfg.py's TarantulaSuspensionEnvCfg.yaw_track_scale=1.6
+    # is a separate, intentionally larger constant compensating for PhysX's
+    # different skid-steer curve response. Don't "fix" one to match the
+    # other; see that docstring for why they're allowed to diverge.
     # drive_scale/yaw_track_scale were calibrated open-loop against the flat
     # floor under world.sdf's skid-steer baseline. On a raw heightmap-mesh
     # collision surface (e.g. generated/terrains/*/world.sdf used by the
@@ -65,6 +79,30 @@ class MotionControlConfig:
     yaw_rate_ki: float = 1.0
     yaw_integral_limit: float = 0.8
     max_wheel_accel: float = 12.0
+    # EMA coefficient for the wheel-F/T observation slice (not the reward,
+    # which stays on the raw instantaneous reading -- see suspension_env.py).
+    # Inspired by the planetary-rover active-suspension RL literature
+    # (arXiv:2606.06790), which explicitly low-pass filters F/T sensor data
+    # before it reaches the policy. alpha=0.3 at this project's 30 Hz control
+    # rate gives a time constant of ~0.1s (~1.7 Hz cutoff): enough to knock
+    # down per-step contact-force noise without lagging real load-transfer
+    # events, which happen on a slower timescale than a single control tick.
+    wheel_force_filter_alpha: float = 0.3
+    # Normalized F/T magnitude above which a wheel counts as "loaded" --
+    # shared by both the contact_support/contact_uptime reward computation
+    # (suspension_env.py) and the deployable contact_uptime observation
+    # feature below (this used to live only in Isaac's RewardsCfg, which was
+    # fine while it was reward-only, but it's no longer reward-only once a
+    # deployable obs feature needs the identical loaded/unloaded judgement).
+    contact_force_threshold: float = 0.15
+    # EMA coefficient for the per-leg "contact uptime" feature (both reward
+    # and -- this is the part that was missing -- observation, see
+    # POSTURE_OBSERVATION_LAYOUT below). 1/30 at 30 Hz gives a ~1s time
+    # constant: long enough that a brief touch-and-go barely moves it (so the
+    # policy/critic can tell "sustained contact" apart from "just blipped
+    # on"), short enough to track real terrain-driven load transfer within
+    # an episode.
+    contact_uptime_alpha: float = 1.0 / 30.0
 
 
 @dataclass(frozen=True)
@@ -178,6 +216,7 @@ def build_posture_observation(
     susp_joint_vel: dict[str, float],
     wheel_joint_vel: dict[str, float],
     wheel_force: dict[str, tuple[float, float, float]],
+    contact_uptime: dict[str, float],
     command: MotionCommand,
     prev_action: np.ndarray,
 ) -> np.ndarray:
@@ -193,6 +232,7 @@ def build_posture_observation(
         + [susp_joint_vel[leg] for leg in LEGS]
         + [wheel_joint_vel[leg] for leg in LEGS]
         + [component for leg in LEGS for component in wheel_force_normalized(wheel_force[leg])]
+        + [contact_uptime[leg] for leg in LEGS]
         + [command.vx, command.wz]
         + list(prev_action_values)
     )

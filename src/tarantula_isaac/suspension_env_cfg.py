@@ -8,10 +8,11 @@ Action space = 6D:
 The PPO policy is an active suspension controller. Wheel commands stay under
 the classical skid-steer baseline and are not policy outputs.
 
-Observation space = 50D:
+Observation space = 56D:
   projected_gravity_b(3) + root_ang_vel_b(3)
   + susp_joint_pos(6) + susp_joint_vel(6) + wheel_joint_vel(6)
   + wheel_force_b(18)      <- wheel-axis F/T equivalent, normalized by nominal wheel load
+  + contact_uptime(6)      <- per-leg EMA contact persistence, ~1s window
   + cmd_vx(1) + cmd_wz(1) + prev_action(6)
 """
 
@@ -56,7 +57,14 @@ class CommandsCfg:
     # push DR; opt in via command profile.
     pursuit_prob = 0.0
     pursuit_checkpoint_count = 3
-    pursuit_arrival_radius = 0.3  # m
+    # 0.3 used to put "arrived" right in the geometric ill-conditioned zone
+    # of bearing-only pursuit: heading_error = atan2(ly, lx) becomes extremely
+    # sensitive to small position changes as distance -> 0 (stand right next
+    # to a point and its bearing swings +-90deg for a few cm of lateral
+    # drift), while cmd_vx never slows down on approach -- the combination
+    # made wz oscillate hard in the last ~0.3m of every checkpoint. 1.0m
+    # advances to the next checkpoint well before entering that zone.
+    pursuit_arrival_radius = 1.0  # m
     # wz = clamp(pursuit_heading_gain * heading_error, -wz_abs_hi, wz_abs_hi),
     # heading_error = atan2(ly, lx) (signed bearing to the checkpoint in the
     # robot's body frame, full -pi..pi range). Deliberately NOT the textbook
@@ -109,48 +117,81 @@ class RewardsCfg:
     orientation_weight = 1.2
     orientation_sigma = 0.25
     roll_pitch_rate_weight = 0.08
-    # loaded_wheels/6.0 (see suspension_env.py) is a continuous 0..1 fraction,
-    # not a threshold -- a prior version only paid out above
-    # contact_min_loaded_wheels=4, which had zero gradient between 0 and 4
-    # loaded wheels and let the policy park 1-3 wheels in the air (swinging
-    # for balance) for free as long as the other >=4 stayed planted. Weight
-    # bumped alongside the formula fix since the old 0.35 was tuned against
-    # the old (much smaller, threshold-gated) typical term value.
-    contact_support_weight = 0.45
+    # Per-leg EMA "contact uptime" (see suspension_env.py's
+    # _contact_uptime_ema), not the instantaneous loaded_wheels/6.0 fraction
+    # it replaces. The instantaneous version has no memory of *how* a wheel
+    # got loaded this step -- a policy that briefly lifts one leg and sets it
+    # back down pays only a fleeting, tiny per-step cost (5/6 vs 6/6), which
+    # can still net-positive if the lift also nudges orientation_reward up
+    # (observed: large-amplitude alternating leg swinging even on near-flat
+    # terrain). The EMA version makes any contact interruption cost linger
+    # for ~1s afterward (alpha=1/30 below), so a lift-and-settle cycle costs
+    # meaningfully more in aggregate than holding still. Weight bumped from
+    # the old formula's 0.45 to sit close to (but below) orientation_weight,
+    # respecting that pitch/roll leveling is still the first priority and
+    # contact persistence the second -- not yet validated by a training run.
+    contact_support_weight = 1.0
     wheel_load_balance_weight = 0.12
-    contact_force_threshold = 0.15
     lin_vel_z_weight = 0.5
-    stuck_weight = 0.25
     # Was split into action_rate_weight (0.03) + hip_action_rate_weight
     # (0.02) penalizing the *exact same* quantity twice under different
     # names -- action_space is hip-only (6D), so "action rate" and "hip
-    # action rate" were never different things. Consolidated into one term;
-    # weight roughly doubles the old combined 0.05, per legged-locomotion RL
-    # convention (ANYmal/legged_gym-style reward sets weight action-rate
-    # penalties meaningfully against the tracking/orientation term, not as
-    # an afterthought) -- the old combined weight was ~40x smaller than
-    # orientation_weight and visibly under-suppressed flat-ground jitter.
-    hip_action_rate_weight = 0.08
-    # New: standard legged-locomotion reward term we were missing -- penalizes
-    # the *physical* hip joint velocity (rad/s, from sim state), not just the
-    # commanded action's frame-to-frame delta. action_rate only sees the
-    # network's output target; if the actuator overshoots/oscillates getting
-    # there (confirmed possible empirically via step-response testing), that
-    # physical jitter is invisible to action_rate alone.
-    joint_vel_weight = 0.01
+    # action rate" were never different things. Consolidated into one term.
+    # Bumped again (0.08 -> 0.16) alongside the contact_support rework above:
+    # ANYmal-on-wheels research (arXiv:2405.01792) found driving wheels cost
+    # ~zero mechanical COT while gratuitous leg adjustment cost real torque,
+    # which is what naturally suppressed unnecessary leg motion there -- our
+    # smoothness terms were priced too cheaply to reproduce that economics on
+    # their own, so this pairs with the contact reward rework rather than
+    # relying on either lever alone.
+    hip_action_rate_weight = 0.16
     # New: "default pose"/nominal-posture regularization, standard in
     # ANYmal/legged_gym-style reward sets (pull joints toward a homing
     # position unless the task needs otherwise). Pulls susp_joint_pos toward
     # stand_susp_target=0 directly. This is the term that's actually missing
     # to suppress a *slow, large-amplitude* cyclic lift (e.g. front-left +
     # rear-left up, mid-right down, hold, then settle to flat, repeat, seen
-    # even on flat ground) -- hip_action_rate/joint_vel are frame-to-frame
-    # (rate/velocity) penalties, structurally blind to a slow deliberate
-    # sweep into a large deviation: each individual step's delta and
-    # velocity stay small even though the cumulative excursion is large.
-    # This term penalizes the absolute deviation regardless of how slowly
-    # it got there.
+    # even on flat ground) -- hip_action_rate is a frame-to-frame (rate)
+    # penalty, structurally blind to a slow deliberate sweep into a large
+    # deviation: each individual step's delta stays small even though the
+    # cumulative excursion is large. This term penalizes the absolute
+    # deviation regardless of how slowly it got there.
     joint_pos_weight = 0.08
+    # Standard legged-locomotion reward term surveyed across legged_gym/
+    # ANYmal (the "torques" reward scale) and the active-suspension
+    # planetary-rover RL literature (arXiv:2606.06790's actuation-cost term,
+    # which explicitly penalizes suspension-joint torque "to limit unnecessary
+    # energy consumption"). Uses the PD-implied applied_torque (Isaac
+    # populates this even for ImplicitActuatorCfg -- robot.py uses implicit
+    # drives for susp_*_joint), capturing actual dynamic effort a small
+    # joint_pos excursion can still hide (e.g. a fast correction held briefly
+    # draws real torque without a large time-averaged position penalty).
+    # Measures effort (force), a dimension neither joint_pos (position) nor
+    # hip_action_rate (rate) can substitute for -- a joint can sit still at a
+    # near-neutral angle and still be straining against a real load. Bumped
+    # 2x alongside hip_action_rate above for the same ANYmal-on-wheels-
+    # economics reason -- still deliberately small next to orientation/
+    # contact_support, which genuinely need torque to react to disturbances
+    # -- not yet validated by a training run, same caveat as joint_pos_weight
+    # above.
+    #
+    # joint_acc_weight (finite-difference joint acceleration) was removed:
+    # it's one derivative beyond hip_action_rate, measuring essentially the
+    # same "is this changing too fast" thing at the joint level, and its
+    # weight (2e-5, smallest in this file by an order of magnitude) was
+    # already close to a no-op. hip_action_rate alone covers this dimension.
+    #
+    # Zeroed (not removed) as a deliberate ablation experiment: a leg that
+    # briefly unloads needs less torque to hold its position, so this term
+    # may have been paying the policy back part of what contact_uptime
+    # charges it for exactly the touch-and-go behavior we're trying to kill
+    # (rough-vs-flat-terrain A/B testing ruled out "necessary terrain
+    # reaction" as the cause -- dithering frequency/amplitude was identical
+    # on the flattest tiles, so it's something the reward landscape itself
+    # is encouraging, not terrain-driven). If this run's dithering doesn't
+    # improve, restore 0.0006 and look elsewhere (hip_action_rate magnitude,
+    # CAPS-style spatial smoothness loss).
+    joint_torque_weight = 0.0
     alive_bonus = 0.05
     termination_penalty = 8.0
     # Reward-only, deliberately NOT an observation: true per-wheel slip needs
@@ -192,6 +233,11 @@ class TerminationsCfg:
 @configclass
 class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # env
+    # decimation * sim.dt below = 1/30s control rate -- must match the
+    # Gazebo deployment node's "rate" ROS param (posture_policy_node.py,
+    # currently 30.0). No shared single-source constant for this (one's a
+    # simulator timestep, the other a ROS timer), so if either changes,
+    # update the other by hand.
     decimation = 4
     # 15s, then 45s, 240s, were all short of the eval-side demo scale
     # (gazebo_pursuit_eval.py runs typically need 180-350s to complete a
@@ -203,7 +249,7 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # makes resets rarer.
     episode_length_s = 300.0
     action_space = 6
-    observation_space = 50  # see module docstring
+    observation_space = 56  # see module docstring
     state_space = 0
 
     # action scaling: policy outputs ±1 -> bounded hip targets
@@ -227,6 +273,18 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     yaw_rate_ki = MOTION_DEFAULTS.yaw_rate_ki
     yaw_integral_limit = MOTION_DEFAULTS.yaw_integral_limit
     max_abs_wheel_omega = MOTION_DEFAULTS.max_abs_wheel_omega
+    # See MotionControlConfig.wheel_force_filter_alpha's docstring -- sourced
+    # from the same shared config the Gazebo deployment node reads, so
+    # training filters the wheel-force observation slice with the exact same
+    # time constant the deployed policy will see.
+    wheel_force_filter_alpha = MOTION_DEFAULTS.wheel_force_filter_alpha
+    # Shared with the Gazebo node (MotionControlConfig) -- no longer
+    # reward-only now that contact_uptime is also a deployable observation
+    # feature (see suspension_env.py's _get_observations and
+    # motion_control.py's POSTURE_OBSERVATION_LAYOUT), so it moved out of
+    # RewardsCfg to live alongside the other Isaac/Gazebo-shared constants.
+    contact_force_threshold = MOTION_DEFAULTS.contact_force_threshold
+    contact_uptime_alpha = MOTION_DEFAULTS.contact_uptime_alpha
     # rad. Real URDF hip joint limit (HIP_TARGET_LIMIT, suspension_core.py) is
     # 0.45 -- 0.25 left a lot of unused mechanical range, making the active
     # suspension visibly underuse its authority on rough terrain. 0.35 keeps

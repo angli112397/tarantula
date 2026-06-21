@@ -15,7 +15,7 @@ The raw command interface is cmd_vel-style: cmd_vx (m/s) and cmd_wz (rad/s).
 The policy observes the limited execution command directly; ``cmd_vx`` and
 ``cmd_wz`` can be active together for Nav2-style curved motion.
 
-Action space = 6D. Obs = 50D. See suspension_env_cfg.py for full layout.
+Action space = 6D. Obs = 56D. See suspension_env_cfg.py for full layout.
 """
 
 from __future__ import annotations
@@ -44,11 +44,10 @@ REWARD_KEYS = (
     "contact_support",
     "wheel_load_balance",
     "lin_vel_z",
-    "stuck",
     "roll_pitch_rate",
     "hip_action_rate",
-    "joint_vel",
     "joint_pos",
+    "joint_torque",
     "slip",
     "alive",
     "termination",
@@ -66,7 +65,7 @@ METRIC_KEYS = (
     "wheel_load_balance",
     "cmd_vx_abs",
     "cmd_wz_abs",
-)
+) + tuple(f"contact_uptime_{leg}" for leg in LEGS)
 
 MISSION_PHASES = tuple((s.name, s.vx, s.wz, s.duration_s) for s in profile_sequence("navi"))
 
@@ -157,6 +156,18 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             float(self.cfg.stand_susp_target),
             device=self.device,
         )
+        # EMA state for the observation-only wheel-force filter (see
+        # cfg.wheel_force_filter_alpha) -- raw (pre-normalize, pre-clamp)
+        # body-frame N, matching what the Gazebo node filters.
+        self._wheel_force_filtered = torch.zeros(self.num_envs, 6, 3, device=self.device)
+        # Per-leg EMA "contact uptime" for the contact_support reward (see
+        # RewardsCfg.contact_support_weight's docstring) -- reward-only
+        # memory, not an observation. Initialized to 1.0 (optimistic: assume
+        # good contact until proven otherwise) rather than 0.0, since this
+        # gets reset every episode and a pessimistic 0.0 start would bias the
+        # first ~1s of every single episode's reward downward regardless of
+        # policy quality.
+        self._contact_uptime_ema = torch.ones(self.num_envs, 6, device=self.device)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -265,12 +276,47 @@ class TarantulaSuspensionEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         self._advance_command_curriculum()
 
+        # Update *before* building obs below, not after: _apply_action()
+        # already applied self._actions this step (pipeline step 2, before
+        # this method's step 6), so every other obs field already reflects
+        # its effect -- updating here first makes the prev_action slice
+        # report that same just-applied action instead of the one from a
+        # step before it, matching posture_policy_node.py's Gazebo-side
+        # timing (it updates self.prev_action right after using the old
+        # value to build obs, then publishes the new action -- so its
+        # prev_action field always equals "the action that produced this
+        # observation's other fields," same invariant as here). Does not
+        # affect hip_action_rate's actions-vs-previous_actions delta in
+        # _get_rewards(), which already ran at pipeline step 3, before this
+        # method (step 6) executes at all.
+        self._previous_actions = self._actions.clone()
+
         susp_joint_pos = self._robot.data.joint_pos[:, self._susp_joint_ids]
         susp_joint_vel = self._robot.data.joint_vel[:, self._susp_joint_ids]
         wheel_joint_vel = self._robot.data.joint_vel[:, self._wheel_joint_ids]
 
-        wheel_force_b = self._wheel_force_b_normalized()
+        # Observation-only EMA filter (cfg.wheel_force_filter_alpha), applied
+        # to the raw force before normalize+clamp -- see
+        # MotionControlConfig.wheel_force_filter_alpha's docstring for why
+        # (ERNEST-rover-style F/T preprocessing, arXiv:2606.06790) and
+        # control_interfaces.ema_wheel_force's docstring for why pre-clamp
+        # ordering matters for matching the Gazebo deployment node exactly.
+        # Reward terms (contact_support, wheel_load_balance) deliberately
+        # keep reading the raw instantaneous _wheel_force_b_normalized()
+        # below, unfiltered -- this filter is a deployable-signal
+        # preprocessing choice, not a reward-shaping one.
+        alpha = float(self.cfg.wheel_force_filter_alpha)
+        self._wheel_force_filtered = alpha * self._wheel_force_b_raw() + (1.0 - alpha) * self._wheel_force_filtered
+        wheel_force_b = torch.clamp(self._wheel_force_filtered / self.cfg.nominal_wheel_load, -3.0, 3.0)
 
+        # self._contact_uptime_ema is already up to date for this step: it's
+        # updated inside _reward_terms(), called from _get_rewards() at
+        # pipeline step 3, strictly before this method (step 6) -- see
+        # DirectRLEnv.step()'s documented ordering. Exposing it here is the
+        # whole point: the contact_support reward depends on this same
+        # recursive state, and a memoryless policy/critic that never sees it
+        # can't tell "held solid contact for a while" apart from "just
+        # touched down" from a single instantaneous F/T reading alone.
         obs = torch.cat(
             (
                 self._robot.data.projected_gravity_b,   # 3
@@ -279,25 +325,30 @@ class TarantulaSuspensionEnv(DirectRLEnv):
                 susp_joint_vel,                         # 6
                 wheel_joint_vel,                        # 6
                 wheel_force_b.reshape(self.num_envs, 18),  # 18
+                self._contact_uptime_ema,               # 6
                 self._exec_cmd_vx.unsqueeze(-1),        # 1
                 self._exec_cmd_wz.unsqueeze(-1),        # 1
                 self._previous_actions,                 # 6
             ),
             dim=-1,
         )
-        self._previous_actions = self._actions.clone()
         if self.cfg.domain_rand.obs_noise_std > 0.0:
             obs = obs + torch.randn_like(obs) * self.cfg.domain_rand.obs_noise_std
         return {"policy": obs}
 
-    def _wheel_force_b_normalized(self) -> torch.Tensor:
+    def _wheel_force_b_raw(self) -> torch.Tensor:
+        """Body-frame per-wheel contact force (N), unnormalized, unclamped."""
         contact_forces = self._wheel_load_sensors.data.net_forces_w_history[:, 0]  # (N, 6, 3)
         base_quat = self._robot.data.root_quat_w
-        wheel_force_b = quat_apply_inverse(
+        return quat_apply_inverse(
             base_quat.unsqueeze(1).expand(-1, contact_forces.shape[1], -1).reshape(-1, 4),
             contact_forces.reshape(-1, 3),
         ).reshape(self.num_envs, 6, 3)
-        return torch.clamp(wheel_force_b / self.cfg.nominal_wheel_load, -3.0, 3.0)
+
+    def _wheel_force_b_normalized(self) -> torch.Tensor:
+        """Raw, instantaneous (unfiltered) -- used by reward/metric terms that
+        want ground truth this step, not the observation's smoothed signal."""
+        return torch.clamp(self._wheel_force_b_raw() / self.cfg.nominal_wheel_load, -3.0, 3.0)
 
     def _advance_command_curriculum(self) -> None:
         # Arc-length distance tracking runs unconditionally (it's ground-truth
@@ -388,21 +439,23 @@ class TarantulaSuspensionEnv(DirectRLEnv):
     def _reward_terms(self) -> dict[str, torch.Tensor]:
         roll, pitch = _quat_roll_pitch(self._imu.data.quat_w)
         hip_action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=-1)
-        joint_vel_penalty = torch.mean(
-            torch.square(self._robot.data.joint_vel[:, self._susp_joint_ids]), dim=-1
-        )
         joint_pos_penalty = torch.mean(
             torch.square(
                 self._robot.data.joint_pos[:, self._susp_joint_ids] - float(self.cfg.stand_susp_target)
             ),
             dim=-1,
         )
+        # PD-implied torque (Isaac populates applied_torque even for
+        # ImplicitActuatorCfg, see RewardsCfg.joint_torque_weight) -- a
+        # standard legged-locomotion regularizer this env was missing.
+        joint_torque_penalty = torch.mean(
+            torch.square(self._robot.data.applied_torque[:, self._susp_joint_ids]), dim=-1
+        )
 
         ang_vel_b = self._robot.data.root_ang_vel_b
         lin_vel_b = self._robot.data.root_lin_vel_b
 
         v_x = lin_vel_b[:, 0]
-        drive_active = torch.abs(self._exec_cmd_vx) >= self.cfg.commands.min_abs_vx
 
         orientation_err = torch.square(roll) + torch.square(pitch)
         orientation_reward = torch.exp(
@@ -411,21 +464,17 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         roll_pitch_rate = torch.sum(torch.square(ang_vel_b[:, :2]), dim=-1)
 
         wheel_force_norm = torch.linalg.norm(self._wheel_force_b_normalized(), dim=-1)
-        loaded_wheels = (wheel_force_norm > float(self.cfg.rewards.contact_force_threshold)).float().sum(dim=-1)
-        # Continuous fraction of wheels loaded, not a threshold: a prior
-        # version only paid out above contact_min_loaded_wheels, which gave
-        # zero gradient between 0 and that many loaded wheels (see
-        # RewardsCfg.contact_support_weight).
-        contact_support = loaded_wheels / 6.0
+        # Per-leg EMA contact uptime (see RewardsCfg.contact_support_weight's
+        # docstring) -- threshold/alpha sourced from cfg (MotionControlConfig
+        # defaults), shared with the same computation in
+        # control_interfaces.ema_contact_uptime on the Gazebo side, and now
+        # also fed into the observation below (see _get_observations).
+        contact_now = (wheel_force_norm > self.cfg.contact_force_threshold).float()
+        alpha_c = self.cfg.contact_uptime_alpha
+        self._contact_uptime_ema = alpha_c * contact_now + (1.0 - alpha_c) * self._contact_uptime_ema
+        contact_support = self._contact_uptime_ema.mean(dim=-1)
         mean_load = torch.mean(wheel_force_norm, dim=-1, keepdim=True)
         load_balance = torch.mean(torch.square(wheel_force_norm - mean_load), dim=-1)
-
-        min_expected_vx = 0.45 * torch.abs(self._exec_cmd_vx)
-        stuck_penalty = torch.where(
-            drive_active,
-            torch.square(torch.clamp(min_expected_vx - torch.abs(v_x), min=0.0)),
-            torch.zeros_like(v_x),
-        )
 
         # Privileged-only slip penalty (see RewardsCfg.slip_weight docstring):
         # true_wz from root_ang_vel_b is sim ground truth; "expected" wheel
@@ -453,10 +502,9 @@ class TarantulaSuspensionEnv(DirectRLEnv):
             "wheel_load_balance": -self.cfg.rewards.wheel_load_balance_weight * load_balance,
             "roll_pitch_rate": -self.cfg.rewards.roll_pitch_rate_weight * roll_pitch_rate,
             "lin_vel_z": -self.cfg.rewards.lin_vel_z_weight * torch.square(lin_vel_b[:, 2]),
-            "stuck": -self.cfg.rewards.stuck_weight * stuck_penalty,
             "hip_action_rate": -self.cfg.rewards.hip_action_rate_weight * hip_action_rate,
-            "joint_vel": -self.cfg.rewards.joint_vel_weight * joint_vel_penalty,
             "joint_pos": -self.cfg.rewards.joint_pos_weight * joint_pos_penalty,
+            "joint_torque": -self.cfg.rewards.joint_torque_weight * joint_torque_penalty,
             "slip": -self.cfg.rewards.slip_weight * slip_penalty,
             "alive": torch.full((self.num_envs,), self.cfg.rewards.alive_bonus, device=self.device),
             "termination": -self.cfg.rewards.termination_penalty * terminated.float(),
@@ -491,6 +539,13 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._metric_sums["wheel_load_balance"] += load_balance
         self._metric_sums["cmd_vx_abs"] += torch.abs(self._exec_cmd_vx)
         self._metric_sums["cmd_wz_abs"] += torch.abs(self._exec_cmd_wz)
+        # Diagnostic only (not reward) -- per-leg contact_uptime EMA, already
+        # updated this step by _reward_terms() (called before this method in
+        # _get_rewards()), so it's safe to just read here. Lets us see post-
+        # training whether one specific corner chronically loses contact
+        # rather than only the 6-leg-averaged reward value.
+        for i, leg in enumerate(LEGS):
+            self._metric_sums[f"contact_uptime_{leg}"] += self._contact_uptime_ema[:, i]
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         terminated = self._termination_flags()
@@ -600,6 +655,8 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._pursuit_checkpoints_left[env_ids] = 0
         self._pursuit_waypoint[env_ids] = 0.0
         self._yaw_error_integral[env_ids] = 0.0
+        self._wheel_force_filtered[env_ids] = 0.0
+        self._contact_uptime_ema[env_ids] = 1.0
 
         self._sample_commands(env_ids)
 

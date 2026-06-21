@@ -238,6 +238,18 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('gui', default_value='true',
                               description='false 时无图形界面运行（headless）'),
+        # 0.0/0.0 is only guaranteed safe for nav_maze (flat floor, this
+        # launch file's actual default world) and gazebo_demo (hand-placed
+        # features deliberately kept small/away from its origin). It is NOT
+        # safe for rl_curriculum: that grid is centered on (0,0), so world
+        # origin sits at a corner where up to 4 curriculum tiles meet, and
+        # generate_heightmap no longer flattens it (removed _clear_spawn --
+        # smoothstep-blending that junction still left a 20-30deg local
+        # slope no radius/feather choice fully fixed). When launching with
+        # world:=generated/terrains/rl_curriculum/<seed>/world.sdf, pass
+        # spawn_x:=-2.0 spawn_y:=-6.0 explicitly -- that tile's (row=0,
+        # col=2) center, difficulty 0, with its own clean _clear_platform
+        # square and no neighboring-tile seam.
         DeclareLaunchArgument('spawn_x', default_value='0.0'),
         DeclareLaunchArgument('spawn_y', default_value='0.0'),
         DeclareLaunchArgument('spawn_z', default_value='0.55'),
