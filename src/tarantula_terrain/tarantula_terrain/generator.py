@@ -124,6 +124,33 @@ def _clear_platform(height, x, y, cx, cy, size):
     height[mask] = 0.0
 
 
+def _add_global_micro_relief(height, rng, amp):
+    """Per-vertex i.i.d. jitter over the whole array, unconditionally --
+    unlike _add_uniform_roughness's coarser per-cell lookup table (which
+    still leaves many adjacent mesh vertices at the same table value, hence
+    coplanar), this has no spatial correlation between neighbors at all, so
+    no two adjacent mesh triangles can land on exactly the same height.
+
+    Exists because every _clear_platform spawn square and the
+    edge_taper_band ring are literal, exactly-flat constants -- and those
+    are precisely where this project has observed skid-steer wheels skate
+    with ~0 yaw torque on mesh collision, while genuinely uneven mesh
+    regions transmit yaw torque fine (see motion_control.py's
+    MotionControlConfig docstring). Amplitude is small (a fraction of the
+    smallest deliberate terrain feature amplitude in _apply_curriculum_tile)
+    so it reads as "still flat" rather than a new obstacle.
+
+    Called before _taper_outer_edge, not after: taper's multiplicative
+    smoothstep (height *= t*t*(3-2t)) scales this jitter back to exactly 0
+    right at the array's outer boundary cells too, the same cells
+    export_world_sdf's surround_copies tiling butts adjacent copies
+    against -- so the literal seam stays exactly flat/matching on both
+    sides, only the interior of the taper band (never a tiling seam itself)
+    gains texture.
+    """
+    height += rng.uniform(-amp, amp, height.shape).astype(np.float32)
+
+
 def _generate_gazebo_demo(cfg: TerrainCfg, rng, x, y):
     height = np.zeros_like(x, dtype=np.float32)
     labels = []
@@ -281,6 +308,7 @@ def generate_heightmap(cfg: TerrainCfg, seed: int):
     # difficulty-0 tile's own _clear_platform square instead (see
     # sim.launch.py's spawn_x/spawn_y, set to a row=0 tile center) -- that's
     # a real flat platform with no neighboring-tile seam, not a blend.
+    _add_global_micro_relief(height, rng, amp=0.004)
     _taper_outer_edge(height, x, y, cfg.size_x, cfg.size_y, cfg.edge_taper_band)
     height = np.clip(height, cfg.min_height, cfg.max_height).astype(np.float32)
 

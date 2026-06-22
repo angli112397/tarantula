@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Active-suspension PPO training (obs=50, action=6).
+# Active-suspension PPO training (obs=56, action=6). Watchdog wrapper around
+# train_v5.py -- extra args ("$@") pass straight through, e.g. --terrain-dir/
+# --command-profile/--pursuit-prob.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

@@ -8,7 +8,7 @@
 永久超阈值、建图饿死，这本身就是调平价值的 A/B 证据）。
 
 订阅  /scan (LaserScan)、/imu/data (Imu)
-发布  scan_gated (LaserScan)
+发布  /scan_gated (LaserScan)
 参数  tilt_gate (rad，默认 0.05 ≈ 3 度)
 参数  output_frame (string，默认 lidar_link)：把 Gazebo scoped sensor frame
       收敛到 URDF frame。
@@ -38,7 +38,7 @@ class ScanGate(Node):
                                  qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self.scan_cb,
                                  qos_profile_sensor_data)
-        self.pub = self.create_publisher(LaserScan, 'scan_gated',
+        self.pub = self.create_publisher(LaserScan, '/scan_gated',
                                          qos_profile_sensor_data)
 
     def imu_cb(self, msg):

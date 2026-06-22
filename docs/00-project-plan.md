@@ -195,8 +195,8 @@ Custom chassis calibration path:
 Active suspension:
 
 ```text
-IMU + joint states + wheel velocity + wheel F/T + shaped cmd + previous action
-  -> 50D observation
+IMU + joint states + wheel velocity + wheel F/T + contact uptime + shaped cmd + previous action
+  -> 56D observation
   -> 6D RLPosturePolicy
   -> /suspension_controller/joint_trajectory
 ```
@@ -205,7 +205,7 @@ The policy must never publish wheel commands and must never alter `/cmd_vel`.
 
 ## RL Contract
 
-Observation space: 50D.
+Observation space: 56D.
 
 ```text
 projected_gravity_b(3)
@@ -213,7 +213,8 @@ root_ang_vel_b(3)
 susp_joint_pos(6)
 susp_joint_vel(6)
 wheel_joint_vel(6)
-wheel_force_b(18)
+wheel_force(18)
+contact_uptime(6)
 exec_cmd_vx(1)
 exec_cmd_wz(1)
 prev_hip_action(6)

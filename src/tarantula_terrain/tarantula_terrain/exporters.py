@@ -43,7 +43,29 @@ import numpy as np
 # wheel <kd> -- found mismatched with no comment justifying a deliberate
 # difference during a full contact-parameter audit. Dirs generated before
 # this have the unmatched terrain-side kd.
-GENERATOR_SCHEMA_VERSION = 8
+# 8->9: DEFAULT_SURFACE.mu/mu2 1.50->0.9, slip1/slip2 0.001->0.0, kd
+# 140.0->10.0 -- a web-research pass on commonly-cited skid-steer wheel
+# contact recipes converged on mu1=mu2=0.9, slip1=slip2=0, kp=1e6, kd=10,
+# min_depth=0.001 as the standard block; matched here and re-matched on
+# tarantula_v3.urdf.xacro's wheel side too. This reverses 7->8's specific
+# number: that audit assumed the wheel's 140.0 was "the one actually
+# tuned" since 10.0 "isn't a generic placeholder" -- backwards, it turns
+# out 10.0 is precisely the standard community value and 140.0 was the
+# actual outlier. Dirs generated before this have the looser mu/slip and
+# the non-canonical kd.
+# 9->10: generator.py now adds a small global per-vertex height jitter
+# (_add_global_micro_relief) everywhere, including every tile's
+# _clear_platform spawn square and the edge_taper_band ring -- both
+# previously literal, exactly-flat constants. Live GUI observation during a
+# pursuit eval (2026-06-22) found the rover skating with ~0 yaw torque
+# specifically while crossing those genuinely flat mesh patches, while
+# visibly gripping fine on the uneven curriculum-tile terrain in between --
+# a hypothesis that DART's mesh narrow-phase can't build a stable contact
+# manifold when many neighboring mesh triangles are exactly/near-exactly
+# coplanar. Not yet confirmed as the root cause, just the best lead so far;
+# dirs generated before this have literal flat patches at every platform/
+# taper-band location to re-test against if it doesn't pan out.
+GENERATOR_SCHEMA_VERSION = 10
 
 
 def _write_png(path: Path, height: np.ndarray) -> None:
@@ -230,17 +252,18 @@ class SurfaceProps:
     a single geometry type.
     """
 
-    mu: float = 1.50
-    mu2: float = 1.50
-    slip1: float = 0.001
-    slip2: float = 0.001
+    # mu/mu2/slip1/slip2/kd below match tarantula_v3.urdf.xacro's wheel
+    # block and the standard community skid-steer wheel contact recipe
+    # (mu1=mu2=0.9, slip1=slip2=0, kp=1e6, kd=10, min_depth=0.001), not
+    # just "matched to whatever the other side happened to have" -- see
+    # GENERATOR_SCHEMA_VERSION's 8->9 changelog entry for why kd=10 here
+    # supersedes the previous 7->8 unification's kd=140.
+    mu: float = 0.9
+    mu2: float = 0.9
+    slip1: float = 0.0
+    slip2: float = 0.0
     kp: float = 1_000_000.0
-    # Matches tarantula_v3.urdf.xacro's wheel <kd> -- found mismatched at
-    # 10.0 vs the wheel's 140.0 during a full-codebase contact-parameter
-    # audit, no comment on either side explaining a deliberate difference.
-    # Unified to the wheel's value since it looks like the one actually
-    # tuned (140.0 isn't a generic placeholder the way 10.0 is).
-    kd: float = 140.0
+    kd: float = 10.0
     max_vel: float = 0.2
     min_depth: float = 0.001
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Active-suspension Isaac Lab environment smoke test
-# Verifies: obs.shape==(N,50), action_space.shape==(N,6), wheel-force sensor alive, no NaN
+# Verifies: obs.shape==(N,POSTURE_OBSERVATION_DIM), action_space.shape==(N,6),
+# wheel joint reaction wrench is alive, no NaN
 # Usage: bash scripts/run_rl_env_smoke_v5.sh
 set -euo pipefail
 
@@ -25,6 +26,7 @@ import torch
 from isaacsim.core.utils.extensions import enable_extension
 enable_extension("isaacsim.asset.importer.urdf")
 # Now Kit is live, safe to import isaaclab sub-modules
+from tarantula_control.motion_control import POSTURE_OBSERVATION_DIM
 from tarantula_isaac.robot import ensure_tarantula_usd
 from tarantula_isaac.suspension_env_cfg import TarantulaSuspensionEnvCfg
 from tarantula_isaac.suspension_env import TarantulaSuspensionEnv
@@ -41,7 +43,8 @@ env = TarantulaSuspensionEnv(cfg=cfg)
 obs_dict, _ = env.reset()
 obs = obs_dict["policy"]
 print(f"[smoke] obs.shape = {obs.shape}")
-assert obs.shape == (cfg.scene.num_envs, 50), f"Expected (N,50), got {obs.shape}"
+assert obs.shape == (cfg.scene.num_envs, POSTURE_OBSERVATION_DIM), \
+    f"Expected (N,{POSTURE_OBSERVATION_DIM}), got {obs.shape}"
 assert not obs.isnan().any(), "NaN in initial obs!"
 log = env.extras.get("log", {})
 for key in (
@@ -74,7 +77,8 @@ for i in range(STEPS):
         sys.exit(1)
 
 print(f"[smoke] Final obs.shape = {obs.shape}, reward mean = {rew.mean():.3f}")
-print("[smoke] PASS - v5 active-suspension env OK (obs=50, action=6, wheel-force sensor, no NaN)")
+print(f"[smoke] PASS - v5 active-suspension env OK (obs={POSTURE_OBSERVATION_DIM}, action=6, "
+      "wheel joint reaction wrench, no NaN)")
 env.close()
 sim_app.close()
 PYEOF

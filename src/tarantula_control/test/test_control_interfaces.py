@@ -6,7 +6,6 @@ from tarantula_control.control_interfaces import (
     DEFAULT_TRACK_SCALE,
     EFFECTIVE_TRACK,
     WHEEL_RADIUS,
-    WHEEL_DIRECTION,
     skid_steer_wheel_speeds,
 )
 from tarantula_control.motion_control import (
@@ -32,11 +31,6 @@ class ControlInterfacesTest(unittest.TestCase):
 
     def test_vehicle_geometry_uses_v3_long_arm_baseline(self):
         self.assertGreater(VEHICLE_GEOMETRY.overall_length, 1.35)
-
-    def test_mean_wheel_forward_velocity_applies_joint_direction(self):
-        speeds = {leg: 2.0 * WHEEL_DIRECTION[leg] for leg in LEGS}
-        from tarantula_control.control_interfaces import mean_wheel_forward_velocity
-        self.assertAlmostEqual(mean_wheel_forward_velocity(speeds), 0.26)
 
     def test_yaw_cmd_splits_left_right(self):
         speeds = skid_steer_wheel_speeds(0.0, 0.2)

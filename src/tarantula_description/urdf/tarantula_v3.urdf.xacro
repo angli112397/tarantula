@@ -29,13 +29,19 @@
            also removes a standing Isaac/Gazebo mismatch rather than adding
            one. 0.9 is the mean of the old mu1/mu2 (1.35, 0.45), which also
            lands near the middle of Isaac's friction_range=(0.05, 1.75)
-           domain-randomization band. -->
+           domain-randomization band, and happens to match the standard
+           community skid-steer wheel contact recipe anyway (mu1=mu2=0.9,
+           slip1=slip2=0, kp=1e6, kd=10, min_depth=0.001). kd dropped from
+           140.0 to that recipe's 10.0 here (tarantula_terrain
+           exporters.py's SurfaceProps re-matches this; see its
+           GENERATOR_SCHEMA_VERSION 8->9 changelog entry for why 140.0
+           was the actual outlier, not 10.0). -->
       <mu1>0.9</mu1>
       <mu2>0.9</mu2>
       <slip1>0.0</slip1>
       <slip2>0.0</slip2>
       <kp>1000000.0</kp>
-      <kd>140.0</kd>
+      <kd>10.0</kd>
     </gazebo>
     <gazebo reference="wheel_${prefix}_joint">
       <sensor name="ft_wheel_${prefix}" type="force_torque">

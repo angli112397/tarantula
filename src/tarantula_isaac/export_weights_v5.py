@@ -144,7 +144,7 @@ if hip_action_target_limit is None:
 npz_data["hip_action_target_limit"] = np.asarray([hip_action_target_limit], dtype=np.float32)
 
 # Validate shapes
-print(f"[export] MLP shapes:")
+print("[export] MLP shapes:")
 for layer_idx in range(len(linear_layers)):
     print(f"  mlp.{layer_idx}.weight: {npz_data[f'mlp.{layer_idx}.weight'].shape}")
     print(f"  mlp.{layer_idx}.bias:   {npz_data[f'mlp.{layer_idx}.bias'].shape}")

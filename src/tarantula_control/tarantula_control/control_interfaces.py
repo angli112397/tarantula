@@ -111,10 +111,6 @@ def ema_contact_uptime(
     }
 
 
-def mean_wheel_forward_velocity(wheel_vel: dict[str, float]) -> float:
-    return sum(wheel_vel[leg] * WHEEL_DIRECTION[leg] for leg in LEGS) / len(LEGS) * WHEEL_RADIUS
-
-
 def skid_steer_wheel_speeds(
     cmd_vx: float,
     cmd_wz: float,

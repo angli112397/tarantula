@@ -10,9 +10,9 @@ scripts/run_rl_env_smoke_v5.sh
 
 The smoke test checks:
 
-- observation shape `(N, 50)`;
+- observation shape `(N, 56)`;
 - action shape `(N, 6)`;
-- wheel F/T contact sensor is alive;
+- wheel joint reaction wrench (`ArticulationData.body_incoming_joint_wrench_b`) is alive;
 - no NaN in observations or rewards;
 - reset origins are lifted above the shared heightmap.
 
@@ -66,7 +66,7 @@ python3 src/tarantula_isaac/export_weights_v5.py \
   --npz-out generated/policies/posture_actor.npz
 ```
 
-The exported actor must be `50D/6D`; any other actor shape is rejected by the Gazebo runtime.
+The exported actor must be `56D/6D`; any other actor shape is rejected by the Gazebo runtime.
 
 ## Evaluate in Gazebo
 

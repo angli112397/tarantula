@@ -44,7 +44,7 @@ Navigation odometry:
 New policy runtime:
 
 - `posture_policy_node`;
-- loads only `50D/6D` active-suspension actors;
+- loads only `56D/6D` active-suspension actors;
 - publishes only hip targets;
 - never publishes wheel targets.
 

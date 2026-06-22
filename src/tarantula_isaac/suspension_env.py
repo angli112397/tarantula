@@ -25,8 +25,8 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import ContactSensor, Imu
-from isaaclab.utils.math import quat_apply_inverse, sample_uniform
+from isaaclab.sensors import Imu
+from isaaclab.utils.math import sample_uniform
 
 from tarantula_control.control_interfaces import (
     EFFECTIVE_TRACK,
@@ -115,6 +115,12 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self._wheel_joint_ids, _ = self._robot.find_joints(
             [f"wheel_{leg}_joint" for leg in LEGS], preserve_order=True
         )
+        # Body ID lookup for indexing body_incoming_joint_wrench_b (see
+        # _wheel_force_b_raw()) -- same explicit order-preserving pattern as
+        # the joint IDs above, not an assumed index order.
+        self._wheel_body_ids, _ = self._robot.find_bodies(
+            [f"wheel_{leg}_link" for leg in LEGS], preserve_order=True
+        )
         # Per-wheel constants used every _apply_action call -- precomputed
         # once instead of re-allocating a device tensor every env step.
         self._wheel_direction = torch.tensor([WHEEL_DIRECTION[leg] for leg in LEGS], device=self.device)
@@ -174,9 +180,6 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self._imu = Imu(self.cfg.imu)
         self.scene.sensors["imu"] = self._imu
-        # Wheel-load sensors: fl/fr/ml/mr/rl/rr alphabetical = LEGS order
-        self._wheel_load_sensors = ContactSensor(self.cfg.wheel_loads)
-        self.scene.sensors["wheel_loads"] = self._wheel_load_sensors
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -337,13 +340,32 @@ class TarantulaSuspensionEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _wheel_force_b_raw(self) -> torch.Tensor:
-        """Body-frame per-wheel contact force (N), unnormalized, unclamped."""
-        contact_forces = self._wheel_load_sensors.data.net_forces_w_history[:, 0]  # (N, 6, 3)
-        base_quat = self._robot.data.root_quat_w
-        return quat_apply_inverse(
-            base_quat.unsqueeze(1).expand(-1, contact_forces.shape[1], -1).reshape(-1, 4),
-            contact_forces.reshape(-1, 3),
-        ).reshape(self.num_envs, 6, 3)
+        """Per-wheel joint reaction force (N), unnormalized, unclamped.
+
+        Despite the "_b" naming convention used elsewhere in this file
+        (robot base frame), this is each wheel's own parent
+        (arm_<leg>_link) frame, NOT robot base frame -- a deliberate match
+        to tarantula_v3.urdf.xacro's ft_wheel_<leg> force_torque sensor,
+        which is mounted on wheel_<leg>_joint with <frame>parent</frame>
+        (also arm_<leg>_link), and which posture_policy_node.py's
+        ft_wheel_cb reads with no further frame rotation either. Matching
+        Gazebo's actual existing convention here, not introducing a new one.
+
+        Source: ArticulationData.body_incoming_joint_wrench_b (PhysX
+        get_link_incoming_joint_force()) -- a true joint constraint
+        reaction wrench at wheel_<leg>_joint, the same sensor TYPE as
+        Gazebo's joint-mounted force_torque sensor. Previously read from a
+        ContactSensor (net_forces_w_history, a body contact-event force) --
+        a different sensor type measuring a related but distinct quantity
+        (raw contact force at the wheel body, not the joint's reaction
+        wrench).
+
+        Sign-flipped: PhysX documents this as "wrench applied from parent
+        to child"; Gazebo's <measure_direction>child_to_parent</measure_direction>
+        reports the opposite (Newton's third law pair) -- negate to match.
+        """
+        wrench = self._robot.data.body_incoming_joint_wrench_b[:, self._wheel_body_ids]  # (N, 6, 6): [...,:3]=force, [...,3:]=torque
+        return -wrench[..., :3]
 
     def _wheel_force_b_normalized(self) -> torch.Tensor:
         """Raw, instantaneous (unfiltered) -- used by reward/metric terms that

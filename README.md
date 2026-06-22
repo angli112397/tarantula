@@ -250,14 +250,16 @@ scripts/gazebo_eval_compare.py \
 Current policy contract:
 
 ```text
-observation: 50D
+observation: 56D
   projected_gravity_b(3)
   root_ang_vel_b(3)
   susp_joint_pos(6)
   susp_joint_vel(6)
   wheel_joint_vel(6)
-  wheel_force_b(18)
-  limited cmd_vx/cmd_wz(2)
+  wheel_force(18)
+  contact_uptime(6)
+  cmd_vx(1)
+  cmd_wz(1)
   previous hip action(6)
 
 action: 6D

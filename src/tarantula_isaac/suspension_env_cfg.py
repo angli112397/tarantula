@@ -18,7 +18,7 @@ Observation space = 56D:
 
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, ImuCfg
+from isaaclab.sensors import ImuCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
@@ -325,11 +325,13 @@ class TarantulaSuspensionEnvCfg(DirectRLEnvCfg):
     # sensors
     imu: ImuCfg = ImuCfg(prim_path="/World/envs/env_.*/Robot/base_link")
 
-    # Wheel-force sensors: simulation contact-force backend used as the Isaac-side
-    # equivalent of deployable wheel-axis F/T sensors.
-    wheel_loads: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/wheel_.*_link",
-        update_period=0.0,
-        history_length=1,
-        track_air_time=False,
-    )
+    # Wheel-force "sensor" is not a separate scene sensor: suspension_env.py
+    # reads it straight off the articulation via ArticulationData.
+    # body_incoming_joint_wrench_b (PhysX get_link_incoming_joint_force()) at
+    # the wheel_<leg>_link bodies -- a true joint reaction wrench at
+    # wheel_<leg>_joint, matching tarantula_v3.urdf.xacro's ft_wheel_<leg>
+    # force_torque sensor exactly (same joint, same parent-link reference
+    # frame). Previously a ContactSensorCfg here (net_forces_w_history, a
+    # body contact-event force) -- a different sensor TYPE than Gazebo's
+    # joint-mounted force_torque sensor, not just a different engine reading
+    # the same quantity. See suspension_env.py's _wheel_force_b_raw().
