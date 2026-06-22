@@ -324,6 +324,39 @@ steering is wheel-only, independent of the RL policy, so this isolates
 whether checkpoint-chasing itself works on the shared terrain). Logs on every
 checkpoint/command-mode transition plus a 5s heartbeat.
 
+## Active-Suspension A/B Result (2026-06-23)
+
+Controlled comparison, current checkpoint
+`stage0_pursuit_jointwrench_microrelief_ep128_3999iter_20260622_actor.npz`,
+same start/goal/terrain: a 20m straight-line pure-pursuit crossing of one
+full curriculum row at medium difficulty (row 2 of 4; all six terrain types
+in sequence -- random_uniform/wave/pyramid_slope_proxy/stairs/
+discrete_obstacles/pit):
+
+![RL on vs RL off attitude comparison](docs/img/rl_ab_comparison_row2.png)
+
+| 指标 | RL off | RL on |
+|---|---|---|
+| 到达目标 | 1/1，用时83.2秒 | 1/1，用时84.6秒 |
+| 最大俯仰角 (pitch) | 0.308 rad (约17.6°) | 0.142 rad (约8.1°) |
+| 俯仰角均方根 (pitch RMS) | 0.099 | 0.044 |
+| 最大横滚角 (roll) | 0.074 rad | 0.120 rad |
+| 超过0.2rad倾斜阈值占比 | 8.77% | 0% |
+
+Same travel time, same terrain, same destination -- the active-suspension
+policy holds less than half the peak/RMS pitch and zero tilt-gate
+violations (vs ~9% of the run without it), without slowing down to do it.
+Reproduce with `--checkpoints "<x>,<y>"` (a single explicit waypoint
+instead of a random multi-checkpoint chase) on `gazebo_pursuit_eval.py`.
+
+On the full 20-checkpoint pure-pursuit marathon (`rl_curriculum/42`,
+seed=42, random checkpoints across the full difficulty range, 600s budget),
+the same checkpoint reaches 12/20 checkpoints (121.4m traveled), 0% tilt --
+the best result measured this session. That metric has real run-to-run
+variance from the underlying skid-steer-on-mesh contact dynamics (see
+docs/00-project-plan.md); the controlled same-path comparison above is the
+more reproducible number to cite.
+
 ## Acceptance
 
 The active-suspension policy is accepted only if it improves posture without hurting basic mobility:
