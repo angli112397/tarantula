@@ -52,28 +52,42 @@ def main() -> int:
     parser.add_argument("--cmd-wz", type=float, default=0.0)
     parser.add_argument("--out-dir", default="generated/benchmarks/posture_eval/latest")
     parser.add_argument("--input-timeout", type=float, default=10.0)
+    parser.add_argument("--tilt-gate-rad", type=float, default=0.05,
+                         help="Mirrors scan_gate.py's tilt_gate default (rad) -- drawn as a "
+                              "reference line on attitude.png. Set <=0 to omit.")
     args = parser.parse_args()
 
     rclpy.init()
     node = PostureEvalNode("gazebo_posture_eval")
-    rows: list[dict] = []
+    # Mutable across step() calls -- see gazebo_pursuit_eval.py's identical
+    # pattern/rationale (create_timer ticks on the node's sim-time clock,
+    # immune to real_time_factor drift; a while+time.sleep loop is not,
+    # even when its *stop* condition is gated on now_s()).
+    state = {"rows": [], "start": None, "done": False}
+
+    def step() -> None:
+        if state["start"] is None:
+            state["start"] = node.now_s()
+        elapsed = node.now_s() - state["start"]
+        if elapsed >= args.settle + args.duration:
+            state["done"] = True
+            return
+        active = elapsed >= args.settle
+        vx = args.cmd_vx if active else 0.0
+        wz = args.cmd_wz if active else 0.0
+        node.publish_cmd(vx, wz)
+        if active:
+            state["rows"].append(collect_sample(node, elapsed - args.settle, vx, wz))
+
     try:
         wait_for_inputs(node, args.input_timeout)
-        period = 1.0 / args.rate
-        start = time.monotonic()
-        end = start + args.settle + args.duration
-        while time.monotonic() < end:
-            rclpy.spin_once(node, timeout_sec=0.0)
-            elapsed = time.monotonic() - start
-            active = elapsed >= args.settle
-            vx = args.cmd_vx if active else 0.0
-            wz = args.cmd_wz if active else 0.0
-            node.publish_cmd(vx, wz)
-            if active:
-                rows.append(collect_sample(node, elapsed - args.settle, vx, wz))
-            time.sleep(period)
+        timer = node.create_timer(1.0 / args.rate, step)
+        while not state["done"]:
+            rclpy.spin_once(node, timeout_sec=0.05)
+        timer.cancel()
         node.publish_cmd(0.0, 0.0)
 
+        rows = state["rows"]
         out_dir = Path(args.out_dir)
         summary = summarize(rows, args.label)
         fieldnames = ["t", "cmd_vx", "cmd_wz", "roll", "pitch", "roll_pitch_rate",
@@ -81,7 +95,8 @@ def main() -> int:
         write_csv(out_dir / "samples.csv", rows, fieldnames)
         (out_dir / "summary.json").parent.mkdir(parents=True, exist_ok=True)
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-        write_attitude_plot(out_dir / "attitude.png", rows)
+        write_attitude_plot(out_dir / "attitude.png", rows,
+                             tilt_gate_rad=args.tilt_gate_rad if args.tilt_gate_rad > 0.0 else None)
         print(json.dumps(summary, indent=2, sort_keys=True))
     finally:
         node.publish_cmd(0.0, 0.0)

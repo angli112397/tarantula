@@ -232,6 +232,9 @@ def main() -> int:
     parser.add_argument("--max-duration", type=float, default=180.0, help="Safety cap in case a checkpoint is never reached.")
     parser.add_argument("--out-dir", default="generated/benchmarks/pursuit_eval/latest")
     parser.add_argument("--input-timeout", type=float, default=10.0)
+    parser.add_argument("--tilt-gate-rad", type=float, default=0.05,
+                         help="Mirrors scan_gate.py's tilt_gate default (rad) -- drawn as a "
+                              "reference line on attitude.png. Set <=0 to omit.")
     args = parser.parse_args()
 
     if args.checkpoints:
@@ -246,51 +249,79 @@ def main() -> int:
 
     rclpy.init()
     node = PostureEvalNode("gazebo_pursuit_eval", track_position=True)
-    rows: list[dict] = []
-    checkpoint_index = 0
-    distance_traveled = 0.0
-    out_of_bounds = False
+    # Mutable across step() calls -- a plain dict instead of nonlocal locals
+    # since step() is a nested function, not a class method.
+    state = {
+        "rows": [],
+        "checkpoint_index": 0,
+        "distance_traveled": 0.0,
+        "out_of_bounds": False,
+        "last_pos": None,
+        "start": None,
+        "done": False,
+    }
+
+    def step() -> None:
+        # First tick lazily captures sim-time zero -- can't read node.now_s()
+        # before the node exists, and this runs inside create_timer's own
+        # callback, fired by the node's (sim-time, once use_sim_time is on)
+        # clock, not time.sleep()-paced wall clock. See PostureEvalNode's
+        # use_sim_time comment: this is what makes the per-tick control
+        # cadence (not just the overall --max-duration budget, fixed
+        # separately via now_s() below) immune to real_time_factor drift
+        # from system/render load -- a manual while+time.sleep loop, even
+        # one gated on now_s() for its *stop* condition, still ticks at a
+        # load-dependent rate, since time.sleep() itself is wall-clock.
+        if state["start"] is None:
+            state["start"] = node.now_s()
+        elapsed = node.now_s() - state["start"]
+        active = elapsed >= args.settle
+
+        if state["last_pos"] is not None:
+            state["distance_traveled"] += math.hypot(
+                node.pos_x - state["last_pos"][0], node.pos_y - state["last_pos"][1]
+            )
+        state["last_pos"] = (node.pos_x, node.pos_y)
+
+        if not (x_lo <= node.pos_x <= x_hi and y_lo <= node.pos_y <= y_hi):
+            state["out_of_bounds"] = True
+            print(f"[ABORT] left the safe bounds box at ({node.pos_x:.2f}, {node.pos_y:.2f}) "
+                  f"-- x in [{x_lo:.2f},{x_hi:.2f}], y in [{y_lo:.2f},{y_hi:.2f}]")
+            state["done"] = True
+            return
+
+        if elapsed >= args.settle + args.max_duration or state["checkpoint_index"] >= len(checkpoints):
+            state["done"] = True
+            return
+
+        if not active:
+            node.publish_cmd(0.0, 0.0)
+            return
+
+        target = checkpoints[state["checkpoint_index"]]
+        heading_error, distance = pursuit_heading_error(node.pos_x, node.pos_y, node.yaw, target)
+        cmd_wz = max(-args.max_cmd_wz, min(args.max_cmd_wz, args.heading_gain * heading_error))
+        if args.rotate_to_heading_threshold > 0.0 and abs(heading_error) > args.rotate_to_heading_threshold:
+            cmd_vx = 0.0
+        else:
+            cmd_vx = args.cmd_vx
+        node.publish_cmd(cmd_vx, cmd_wz)
+        state["rows"].append(collect_sample(node, elapsed - args.settle, cmd_vx, cmd_wz,
+                                             state["checkpoint_index"], distance, state["distance_traveled"]))
+        if distance < args.arrival_radius:
+            state["checkpoint_index"] += 1
+
     try:
         wait_for_inputs(node, args.input_timeout)
-        period = 1.0 / args.rate
-        start = time.monotonic()
-        end = start + args.settle + args.max_duration
-        last_pos = None
-        while time.monotonic() < end and checkpoint_index < len(checkpoints):
-            rclpy.spin_once(node, timeout_sec=0.0)
-            elapsed = time.monotonic() - start
-            active = elapsed >= args.settle
-
-            if last_pos is not None:
-                distance_traveled += math.hypot(node.pos_x - last_pos[0], node.pos_y - last_pos[1])
-            last_pos = (node.pos_x, node.pos_y)
-
-            if not (x_lo <= node.pos_x <= x_hi and y_lo <= node.pos_y <= y_hi):
-                out_of_bounds = True
-                print(f"[ABORT] left the safe bounds box at ({node.pos_x:.2f}, {node.pos_y:.2f}) "
-                      f"-- x in [{x_lo:.2f},{x_hi:.2f}], y in [{y_lo:.2f},{y_hi:.2f}]")
-                break
-
-            if not active:
-                node.publish_cmd(0.0, 0.0)
-                time.sleep(period)
-                continue
-
-            target = checkpoints[checkpoint_index]
-            heading_error, distance = pursuit_heading_error(node.pos_x, node.pos_y, node.yaw, target)
-            cmd_wz = max(-args.max_cmd_wz, min(args.max_cmd_wz, args.heading_gain * heading_error))
-            if args.rotate_to_heading_threshold > 0.0 and abs(heading_error) > args.rotate_to_heading_threshold:
-                cmd_vx = 0.0
-            else:
-                cmd_vx = args.cmd_vx
-            node.publish_cmd(cmd_vx, cmd_wz)
-            rows.append(collect_sample(node, elapsed - args.settle, cmd_vx, cmd_wz, checkpoint_index,
-                                        distance, distance_traveled))
-            if distance < args.arrival_radius:
-                checkpoint_index += 1
-            time.sleep(period)
+        timer = node.create_timer(1.0 / args.rate, step)
+        while not state["done"]:
+            rclpy.spin_once(node, timeout_sec=0.05)
+        timer.cancel()
         node.publish_cmd(0.0, 0.0)
 
+        rows = state["rows"]
+        checkpoint_index = state["checkpoint_index"]
+        out_of_bounds = state["out_of_bounds"]
         out_dir = Path(args.out_dir)
         summary = summarize(rows, args.label, checkpoints, checkpoint_index, out_of_bounds)
         fieldnames = ["t", "cmd_vx", "cmd_wz", "pos_x", "pos_y", "checkpoint_index",
@@ -300,7 +331,8 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
         (out_dir / "checkpoints.json").write_text(json.dumps(checkpoints, indent=2), encoding="utf-8")
-        write_attitude_plot(out_dir / "attitude.png", rows)
+        write_attitude_plot(out_dir / "attitude.png", rows,
+                             tilt_gate_rad=args.tilt_gate_rad if args.tilt_gate_rad > 0.0 else None)
         write_trajectory_plot(out_dir / "trajectory.png", rows, checkpoints)
         print(json.dumps(summary, indent=2, sort_keys=True))
         if out_of_bounds:

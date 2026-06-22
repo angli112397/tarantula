@@ -13,6 +13,7 @@ from pathlib import Path
 from geometry_msgs.msg import Twist, Wrench
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Imu, JointState
 
 from tarantula_control.suspension_core import HIP_JOINTS, LEGS, quat_roll_pitch, quat_yaw
@@ -40,7 +41,17 @@ class PostureEvalNode(Node):
     """
 
     def __init__(self, node_name: str = "gazebo_posture_eval", track_position: bool = False):
-        super().__init__(node_name)
+        # use_sim_time, not the default wall clock: every other deployable
+        # node in sim.launch.py (motion_control_node, posture_policy_node,
+        # wheel_odometry_node, robot_state_publisher) already sets this --
+        # these eval scripts were the one inconsistent holdout. Matters
+        # because Gazebo's real_time_factor isn't pinned to exactly 1.0
+        # (measured ~0.977-1.0 depending on system load, e.g. GUI render
+        # load); a wall-clock-paced --max-duration/--settle gives a
+        # different actual amount of *simulated* time across runs with
+        # different load, breaking run-to-run comparability of "10 minutes"
+        # of eval. See now_s().
+        super().__init__(node_name, parameter_overrides=[Parameter("use_sim_time", value=True)])
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
@@ -94,6 +105,12 @@ class PostureEvalNode(Node):
     def ready(self) -> bool:
         return self.seen_imu and self.seen_joint and self.seen_odom
 
+    def now_s(self) -> float:
+        """Simulated seconds (use_sim_time=true, sourced from /clock) -- use
+        this for any duration/timestamp that should be comparable across
+        runs regardless of real_time_factor, not time.monotonic()."""
+        return self.get_clock().now().nanoseconds / 1.0e9
+
 
 def posture_sample_fields(node: PostureEvalNode) -> dict:
     """Posture/load fields shared by every sample row regardless of eval script."""
@@ -142,7 +159,15 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         writer.writerows(rows)
 
 
-def write_attitude_plot(path: Path, rows: list[dict], x_key: str = "t") -> None:
+def write_attitude_plot(path: Path, rows: list[dict], x_key: str = "t", *, tilt_gate_rad: float | None = None) -> None:
+    """tilt_gate_rad, if given, draws dashed +-reference lines -- e.g.
+    scan_gate.py's tilt_gate parameter (default 0.05 rad ~= 3deg), the
+    roll/pitch threshold above which Nav2 drops a lidar scan frame as a
+    tilt-corrupted phantom-obstacle read. Not imported as a shared constant:
+    scan_gate.py declares it as a bare ROS2 parameter default, not a module-
+    level constant, so this is a deliberate mirror, not a single source of
+    truth -- if scan_gate.py's default changes, update the caller's literal
+    here too."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -156,6 +181,10 @@ def write_attitude_plot(path: Path, rows: list[dict], x_key: str = "t") -> None:
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(xs, [row["roll"] for row in rows], label="roll")
     ax.plot(xs, [row["pitch"] for row in rows], label="pitch")
+    if tilt_gate_rad is not None:
+        ax.axhline(tilt_gate_rad, color="red", linestyle="--", linewidth=1.0,
+                   label=f"Nav2 scan-gate threshold (+-{tilt_gate_rad:g} rad)")
+        ax.axhline(-tilt_gate_rad, color="red", linestyle="--", linewidth=1.0)
     ax.set_xlabel(x_key)
     ax.set_ylabel("rad")
     ax.grid(True, linewidth=0.3)

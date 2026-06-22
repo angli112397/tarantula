@@ -11,8 +11,6 @@ commands the six hip joints.
 
 from __future__ import annotations
 
-import time
-
 import rclpy
 from geometry_msgs.msg import Twist
 from rcl_interfaces.msg import SetParametersResult
@@ -60,7 +58,13 @@ class MotionControlNode(Node):
 
         self.ang_vel = (0.0, 0.0, 0.0)
         self.joint_seen = False
-        self.last_step_time = time.monotonic()
+        # use_sim_time is set on this node (see sim.launch.py) specifically
+        # so get_clock().now() returns simulated time here, not wall time --
+        # dt feeds the yaw-rate integral and the wheel accel rate-limiter in
+        # step() below, both physically meaningful only relative to how much
+        # *simulated* time elapsed between ticks, not wall-clock time, which
+        # diverges from it under load (real_time_factor != 1).
+        self.last_step_time = self.get_clock().now()
 
         self.wheel_pub = self.create_publisher(Float64MultiArray, "/wheel_velocity_controller/commands", 10)
         self.status_pub = self.create_publisher(Float64MultiArray, "/motion_control/status", 10)
@@ -121,8 +125,8 @@ class MotionControlNode(Node):
         if not self.joint_seen:
             return
 
-        now = time.monotonic()
-        dt = max(now - self.last_step_time, 0.0)
+        now = self.get_clock().now()
+        dt = max((now - self.last_step_time).nanoseconds / 1.0e9, 0.0)
         self.last_step_time = now
 
         command = self.motion_controller.limit_command(self.cmd_vx, self.cmd_wz)

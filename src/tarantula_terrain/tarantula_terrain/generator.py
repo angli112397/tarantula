@@ -140,6 +140,24 @@ def _add_global_micro_relief(height, rng, amp):
     smallest deliberate terrain feature amplitude in _apply_curriculum_tile)
     so it reads as "still flat" rather than a new obstacle.
 
+    amp=0.004 was observed once to not be enough for a cold-start in-place
+    turn right at a _clear_platform spawn square (zero initial velocity,
+    so the wheels must break static grip from rest rather than just
+    maintain an already-turning rotation), failing the same way the
+    pre-fix literal-flat case did. Tried amp=0.010 instead (5-9x closer to
+    terrain types that reliably transmit yaw torque elsewhere, e.g.
+    random_uniform difficulty=1.0 std~0.031) -- that fixed the cold-start
+    case but then broke a previously-clean pursuit-eval run (seed=42 on
+    the same checkpoint, previously 11/20 checkpoints/112.3m/0% tilt) that
+    had never failed at amp=0.004, so reverted back to 0.004. Net: this
+    amplitude is a real, currently-unresolved tradeoff, not a solved
+    constant -- raising it can fix one symptom (cold-start grip) while
+    introducing a different one elsewhere (exact mechanism not yet
+    understood; possibly interacts with how curriculum-tile boundary
+    seams get smoothed by _soften_edges, see _generate_rl_curriculum's
+    docstring on tile-seam cliffs). Don't bump it again without re-running
+    a known-good seed (42) to confirm nothing else regresses.
+
     Called before _taper_outer_edge, not after: taper's multiplicative
     smoothstep (height *= t*t*(3-2t)) scales this jitter back to exactly 0
     right at the array's outer boundary cells too, the same cells

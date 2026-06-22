@@ -65,7 +65,22 @@ import numpy as np
 # coplanar. Not yet confirmed as the root cause, just the best lead so far;
 # dirs generated before this have literal flat patches at every platform/
 # taper-band location to re-test against if it doesn't pan out.
-GENERATOR_SCHEMA_VERSION = 10
+# 10->11: _add_global_micro_relief amp 0.004->0.010 -- a cold-start in-place
+# turn right at a _clear_platform spawn square (zero initial velocity)
+# still failed with amp=0.004; measured actual height std there (~0.006)
+# vs reliably-turnable terrain elsewhere (~0.031-0.057) and found the
+# platform's margin too thin. Dirs generated before this have the
+# thinner-margin jitter at every platform/taper-band location.
+# 11->12: reverted _add_global_micro_relief amp 0.010->0.004. The 10->11
+# bump fixed the cold-start-at-spawn-platform symptom but broke a
+# previously-clean, previously-verified pursuit-eval run (seed=42, same
+# checkpoint, was 11/20 checkpoints/112.3m/0% tilt at amp=0.004, started
+# failing at amp=0.010) -- net negative, not a clean improvement. Back to
+# 0.004 restores the known-good seed=42 behavior; the cold-start-at-spawn
+# issue amp=0.010 fixed is reintroduced and still unresolved. See
+# generator.py's _add_global_micro_relief docstring -- this amplitude is
+# a real, currently-open tradeoff, not a solved constant.
+GENERATOR_SCHEMA_VERSION = 12
 
 
 def _write_png(path: Path, height: np.ndarray) -> None:
