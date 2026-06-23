@@ -1,6 +1,6 @@
 # Tarantula
 
-六轮主动悬挂/轮腿式底盘仿真项目。当前 baseline 已切换为：
+六轮主动悬挂/轮腿式底盘仿真项目，强化学习驱动的主动悬挂姿态控制，仿真环境为 Gazebo（ROS2）+ Isaac Lab。当前 baseline：
 
 ```text
 shared heightmap terrain
@@ -16,6 +16,82 @@ shared heightmap terrain
 
 - [docs/00-project-plan.md](docs/00-project-plan.md)
 - [docs/05-chassis-model-redesign.md](docs/05-chassis-model-redesign.md)
+
+## Results
+
+Controlled pure-pursuit A/B comparisons, active-suspension policy vs. the same
+checkpoint disabled -- same path, same terrain, same travel time in every pair.
+
+### Posture Stability
+
+A 20m straight-line crossing of one full curriculum row at medium difficulty
+(all six terrain types in sequence -- random_uniform/wave/pyramid_slope_proxy/
+stairs/discrete_obstacles/pit):
+
+![RL on vs RL off attitude comparison](docs/img/rl_ab_comparison_row2.png)
+
+| 指标 | RL off | RL on |
+|---|---|---|
+| 到达目标 | 1/1，用时83.2秒 | 1/1，用时84.6秒 |
+| 最大俯仰角 (pitch) | 0.308 rad (约17.6°) | 0.142 rad (约8.1°) |
+| 俯仰角均方根 (pitch RMS) | 0.099 | 0.044 |
+| 最大横滚角 (roll) | 0.074 rad | 0.120 rad |
+| 超过0.2rad倾斜阈值占比 | 8.77% | 0% |
+
+Same travel time, same terrain, same destination -- the active-suspension
+policy holds less than half the peak/RMS pitch and zero tilt-gate violations,
+without slowing down to do it. Reproduce with `--checkpoints "<x>,<y>"` (a
+single explicit waypoint instead of a random multi-checkpoint chase) on
+`gazebo_pursuit_eval.py`.
+
+On the full 20-checkpoint pure-pursuit marathon (`rl_curriculum/42`, seed=42,
+random checkpoints across the full difficulty range, 600s budget), the same
+checkpoint reaches 12/20 checkpoints (121.4m traveled), 0% tilt -- the best
+result measured for this checkpoint. That metric has real run-to-run variance
+from the underlying skid-steer-on-mesh contact dynamics (see
+docs/00-project-plan.md); the controlled same-path comparison above is the
+more reproducible number to cite.
+
+### SLAM Mapping Reliability
+
+Posture stability also affects a concrete downstream consumer: `scan_gate`
+drops any lidar frame whose roll/pitch exceeds its tilt-gate threshold
+(default 0.05 rad) before it reaches SLAM, since a tilt-corrupted scan would
+plant phantom obstacles in the map -- so less tilt should mean fewer dropped
+frames.
+
+`scripts/generate_diagonal_maze_demo.py` overlays a recursive-backtracker
+maze of wall segments onto the existing, already-validated `rl_curriculum/42`
+terrain (no height regeneration -- walls are pure SDF geometry added on top
+of the same `terrain.sdf`), with a corridor cleared along the diagonal from
+corner `(-10,-6)` to corner `(10,6)` so a single-waypoint pure-pursuit run
+crosses all four difficulty rows without clipping a wall:
+
+```bash
+PYTHONPATH=src:src/tarantula_terrain \
+python3 scripts/generate_diagonal_maze_demo.py
+# writes generated/terrains/diagonal_maze_demo/42/world_mesh_contact.sdf
+```
+
+Launch that world, bring up `nav.launch.py` (scan_gate + slam_toolbox) and
+drive the same diagonal with `gazebo_pursuit_eval.py --checkpoints
+"10.0,6.0"`, RL off then RL on:
+
+![SLAM map comparison](docs/img/slam_map_comparison.png)
+
+| 指标 | RL off | RL on |
+|---|---|---|
+| 到达目标 | 1/1，100.6秒 | 1/1，100.85秒 |
+| scan_gate 累计丢帧 | 851 | 251 |
+| 丢帧率（约1006帧总数） | ~85% | ~25% |
+
+Same path, same travel time -- the dropped-frame rate falls by more than 3x.
+Both final maps still trace the corridor's outline regardless (the robot
+moves slowly enough that a dropped frame is usually backfilled a moment
+later), so the drop-rate number is the more reproducible thing to cite, not a
+visual diff of the finished maps. Save a map for comparison with `ros2 run
+nav2_map_server map_saver_cli -f <out>/slam_map --ros-args -p
+use_sim_time:=true`.
 
 ## Project Contract
 
@@ -38,6 +114,15 @@ src/tarantula_terrain       Shared heightmap generator and Gazebo exporters
 docs/                       Current project plan and chassis decisions
 scripts/                    Current smoke/train/commissioning helpers
 generated/terrains/         Generated heightmaps, meshes, SDF, metadata
+```
+
+## Build
+
+```bash
+cd /home/ang/Documents/tarantula
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --parallel-workers 1 --executor sequential
+source install/setup.bash
 ```
 
 ## Navigation Maze
@@ -91,15 +176,6 @@ but `/map` stays a normal localization map. All maps preserve Gazebo/world x
 columns and flip only image rows when exporting, matching ROS `map_server`'s
 top-row image convention while keeping world `x/y` coordinates aligned with the
 SDF wall boxes.
-
-## Build
-
-```bash
-cd /home/ang/Documents/tarantula
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --parallel-workers 1 --executor sequential
-source install/setup.bash
-```
 
 ## Gazebo/Nav2 Baseline
 
@@ -324,40 +400,7 @@ steering is wheel-only, independent of the RL policy, so this isolates
 whether checkpoint-chasing itself works on the shared terrain). Logs on every
 checkpoint/command-mode transition plus a 5s heartbeat.
 
-## Active-Suspension A/B Result (2026-06-23)
-
-Controlled comparison, current checkpoint
-`stage0_pursuit_jointwrench_microrelief_ep128_3999iter_20260622_actor.npz`,
-same start/goal/terrain: a 20m straight-line pure-pursuit crossing of one
-full curriculum row at medium difficulty (row 2 of 4; all six terrain types
-in sequence -- random_uniform/wave/pyramid_slope_proxy/stairs/
-discrete_obstacles/pit):
-
-![RL on vs RL off attitude comparison](docs/img/rl_ab_comparison_row2.png)
-
-| 指标 | RL off | RL on |
-|---|---|---|
-| 到达目标 | 1/1，用时83.2秒 | 1/1，用时84.6秒 |
-| 最大俯仰角 (pitch) | 0.308 rad (约17.6°) | 0.142 rad (约8.1°) |
-| 俯仰角均方根 (pitch RMS) | 0.099 | 0.044 |
-| 最大横滚角 (roll) | 0.074 rad | 0.120 rad |
-| 超过0.2rad倾斜阈值占比 | 8.77% | 0% |
-
-Same travel time, same terrain, same destination -- the active-suspension
-policy holds less than half the peak/RMS pitch and zero tilt-gate
-violations (vs ~9% of the run without it), without slowing down to do it.
-Reproduce with `--checkpoints "<x>,<y>"` (a single explicit waypoint
-instead of a random multi-checkpoint chase) on `gazebo_pursuit_eval.py`.
-
-On the full 20-checkpoint pure-pursuit marathon (`rl_curriculum/42`,
-seed=42, random checkpoints across the full difficulty range, 600s budget),
-the same checkpoint reaches 12/20 checkpoints (121.4m traveled), 0% tilt --
-the best result measured this session. That metric has real run-to-run
-variance from the underlying skid-steer-on-mesh contact dynamics (see
-docs/00-project-plan.md); the controlled same-path comparison above is the
-more reproducible number to cite.
-
-## Acceptance
+## Acceptance Criteria
 
 The active-suspension policy is accepted only if it improves posture without hurting basic mobility:
 
