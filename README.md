@@ -1,6 +1,6 @@
 # Tarantula
 
-六轮主动悬挂/轮腿式底盘仿真项目，强化学习驱动的主动悬挂姿态控制，仿真环境为 Gazebo（ROS2）+ Isaac Lab。当前 baseline：
+Six-wheel active-suspension / wheel-leg chassis simulation project with RL-driven active-suspension posture control, simulated in Gazebo (ROS2) + Isaac Lab. Current baseline:
 
 ```text
 shared heightmap terrain
@@ -12,7 +12,7 @@ shared heightmap terrain
   -> Isaac Lab posture-control curriculum
 ```
 
-项目 source of truth：
+Project source of truth:
 
 - [docs/00-project-plan.md](docs/00-project-plan.md)
 - [docs/05-chassis-model-redesign.md](docs/05-chassis-model-redesign.md)
@@ -30,13 +30,13 @@ stairs/discrete_obstacles/pit):
 
 ![RL on vs RL off attitude comparison](docs/img/rl_ab_comparison_row2.png)
 
-| 指标 | RL off | RL on |
+| Metric | RL off | RL on |
 |---|---|---|
-| 到达目标 | 1/1，用时83.2秒 | 1/1，用时84.6秒 |
-| 最大俯仰角 (pitch) | 0.308 rad (约17.6°) | 0.142 rad (约8.1°) |
-| 俯仰角均方根 (pitch RMS) | 0.099 | 0.044 |
-| 最大横滚角 (roll) | 0.074 rad | 0.120 rad |
-| 超过0.2rad倾斜阈值占比 | 8.77% | 0% |
+| Reached goal | 1/1, 83.2s | 1/1, 84.6s |
+| Max pitch | 0.308 rad (~17.6°) | 0.142 rad (~8.1°) |
+| Pitch RMS | 0.099 | 0.044 |
+| Max roll | 0.074 rad | 0.120 rad |
+| Time over 0.2 rad tilt threshold | 8.77% | 0% |
 
 Same travel time, same terrain, same destination -- the active-suspension
 policy holds less than half the peak/RMS pitch and zero tilt-gate violations,
@@ -79,11 +79,11 @@ drive the same diagonal with `gazebo_pursuit_eval.py --checkpoints
 
 ![SLAM map comparison](docs/img/slam_map_comparison.png)
 
-| 指标 | RL off | RL on |
+| Metric | RL off | RL on |
 |---|---|---|
-| 到达目标 | 1/1，100.6秒 | 1/1，100.85秒 |
-| scan_gate 累计丢帧 | 851 | 251 |
-| 丢帧率（约1006帧总数） | ~85% | ~25% |
+| Reached goal | 1/1, 100.6s | 1/1, 100.85s |
+| scan_gate cumulative dropped frames | 851 | 251 |
+| Drop rate (~1006 total frames) | ~85% | ~25% |
 
 Same path, same travel time -- the dropped-frame rate falls by more than 3x.
 Both final maps still trace the corridor's outline regardless (the robot
@@ -95,13 +95,21 @@ use_sim_time:=true`.
 
 ## Project Contract
 
-RL 不再参与轮速、yaw、track width、drive scale 或轨迹跟踪补偿。运动、SLAM、导航使用 ROS2/Nav2 最佳实践；RL 只作为主动悬挂 policy，发布六个髋关节目标，让底盘在可滚过复杂路况上保持更小 roll/pitch、更稳定轮载和更好的 LiDAR/SLAM 输入。
+RL no longer touches wheel speed, yaw, track width, drive scale, or
+trajectory-tracking compensation. Motion, SLAM, and navigation follow
+standard ROS2/Nav2 practice; RL only runs as the active-suspension policy,
+publishing six hip joint targets so the chassis holds smaller roll/pitch,
+more even wheel loading, and cleaner LiDAR/SLAM input while rolling over
+rough terrain.
 
-当前承诺的 traversability envelope：
+Current traversability envelope commitment:
 
-- 低速可滚过粗糙地面、浅坑、缓坡、低台阶、横坡。
-- Navi 负责绕开不可通行障碍并提供合理路径。
-- 主动悬挂只改善支撑和传感器姿态，不承诺高台阶、深沟或步态式越障。
+- Low-speed traversal over rough ground, shallow pits, gentle slopes, low
+  steps, and side slopes.
+- Navigation is responsible for routing around impassable obstacles and
+  providing a reasonable path.
+- Active suspension only improves support and sensor attitude; it does not
+  promise high-step, deep-trench, or gait-based obstacle traversal.
 
 ## Repository Layout
 
